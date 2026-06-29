@@ -1,1 +1,6 @@
 build/
+hw/netlist_s105.net
+hw/*.log
+hw/*.erc
+hw/fp-info-cache
+hw/.venv/

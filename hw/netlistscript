@@ -1,0 +1,488 @@
+#!/usr/bin/env python3
+"""
+s105 (S501) — 5-port managed switch.
+
+KSZ9477 5-port GbE switch ASIC + Allwinner V3c management SoC.
+The V3c drives the KSZ9477 over SPI (register config) and connects
+to the switch CPU port over RMII (DSA-tagged management + in-band).
+A single SPI flash holds the V3c rootfs.
+
+Ported from f.appliance/netlistscript. Reused verbatim: KSZ9477,
+the 5 GbE MagJacks, the power tree, SPI management, crystal, and
+reference/strap resistors. Removed (firewall-specific): LAN7431
+PCIe-to-RGMII NIC, the PCIe FPC connector, and the Cubie A7S mount.
+Added: V3c SoC, SPI flash, and the RMII CPU-port link.
+
+KSZ9477S datasheet DS00002392C. V3c pinout: SEE DATASHEET — the
+sections marked `### NEEDS V3c DATASHEET` carry net names but
+placeholder pin numbers (P_xxx) that MUST be replaced with real
+ball/pin numbers from the V3c datasheet before this netlist is
+trustworthy. They are intentionally NOT invented.
+"""
+
+from skidl import *
+
+# ============================================================
+# Stable ref counters
+# ============================================================
+_cref = [0]
+_rref = [0]
+
+def cap(value, fp='Capacitor_SMD:C_0402_1005Metric'):
+  _cref[0] += 1
+  c = Part('Device', 'C', value=value, footprint=fp)
+  c.ref = f'C{_cref[0]}'
+  return c
+
+def res(value):
+  _rref[0] += 1
+  r = Part('Device', 'R', value=value,
+           footprint='Resistor_SMD:R_0402_1005Metric')
+  r.ref = f'R{_rref[0]}'
+  return r
+
+# ============================================================
+# Power nets — switch needs 1V2 / 2V5 / 3V3; V3c adds its own
+# core rail (see V3c section). Barrel-jack 5V in (no USB-C PD —
+# a switch is mains-powered via an adapter, not bus-powered).
+# ============================================================
+vdd12 = Net('VDD_1V2')
+vdd25 = Net('VDD_2V5')
+vdd33 = Net('VDD_3V3')
+gnd   = Net('GND')
+vin   = Net('VIN_5V')
+
+# ============================================================
+# 5V barrel jack input
+# ============================================================
+J_PWR = Part(
+  tool=SKIDL, name='BarrelJack', ref_prefix='J',
+  dest=NETLIST,
+  footprint='Connector_BarrelJack:'
+            'BarrelJack_Wuerth_694106301002_Horizontal',
+  pins=[
+    Pin(num='1', name='VIN', func=Pin.types.PWRIN),
+    Pin(num='2', name='GND', func=Pin.types.PWRIN),
+    Pin(num='3', name='GND2', func=Pin.types.PWRIN),
+  ])
+J_PWR['1'] += vin
+J_PWR['2'] += gnd
+J_PWR['3'] += gnd
+
+c = cap('100uF', 'Capacitor_SMD:C_1206_3216Metric')  # input bulk
+c[1] += vin
+c[2] += gnd
+
+# ============================================================
+# KSZ9477S — 128-TQFP-EP, DS00002392C Table 3-1  [REUSED]
+# ============================================================
+U1 = Part(
+  tool=SKIDL, name='KSZ9477S', ref_prefix='U',
+  dest=NETLIST,
+  footprint='QFP40P1600X1600X120-129N',
+  pins=[
+    Pin(num=str(i), name=f'P{i}',
+        func=Pin.types.BIDIR)
+    for i in range(1, 129)
+  ] + [
+    Pin(num='129', name='EP',
+        func=Pin.types.PASSIVE)
+  ])
+
+# ============================================================
+# Power regulators — 5V -> 3.3V -> 2.5V, 1.2V  [REUSED]
+# ============================================================
+U2 = Part(
+  'Regulator_Linear', 'AMS1117-3.3',
+  footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
+  ref='U2')
+U2['VI'] += vin
+U2['VO'] += vdd33
+U2['GND'] += gnd
+
+U3 = Part(
+  'Regulator_Linear', 'AMS1117-2.5',
+  footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
+  ref='U3')
+U3['VI'] += vdd33
+U3['VO'] += vdd25
+U3['GND'] += gnd
+
+U4 = Part(
+  'Regulator_Linear', 'AZ1117-1.2',
+  footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
+  ref='U4')
+U4['VI'] += vdd33
+U4['VO'] += vdd12
+U4['GND'] += gnd
+
+# Bulk 10uF per rail
+for rail in [vin, vdd33, vdd25, vdd12]:
+  c = cap('10uF', 'Capacitor_SMD:C_0805_2012Metric')
+  c[1] += rail
+  c[2] += gnd
+
+# ============================================================
+# KSZ9477S power pins + decoupling  [REUSED]
+# ============================================================
+for p in [3, 14, 19, 30, 36, 41, 114, 119, 124]:
+  U1[p] += vdd12   # AVDDL
+for p in [10, 22, 33, 44, 111, 122, 128]:
+  U1[p] += vdd25   # AVDDH
+for p in [11, 23, 45, 56, 66, 70, 87, 104, 110]:
+  U1[p] += vdd12   # DVDDL
+for p in [61, 68, 99]:
+  U1[p] += vdd33   # VDDIO
+for p in [71, 84]:
+  U1[p] += vdd12   # VDDLS
+for p in [72, 83]:
+  U1[p] += vdd25   # VDDHS
+for p in [46, 47, 69, 75, 77, 80, 107, 109, 123, 129]:
+  U1[p] += gnd
+
+for rail in ([vdd25] * 10 + [vdd12] * 18 + [vdd33] * 7):
+  c = cap('100nF')
+  c[1] += rail
+  c[2] += gnd
+
+# ============================================================
+# KSZ9477S crystal — 25MHz  [REUSED]
+# ============================================================
+Y1 = Part('Device', 'Crystal', value='25MHz',
+          footprint='Crystal:Crystal_HC49-4H_Vertical')
+xi_net = Net('XI')
+xo_net = Net('XO')
+U1[126] += xi_net
+U1[125] += xo_net
+Y1[1] += xi_net
+Y1[2] += xo_net
+c = cap('15pF'); c[1] += xi_net; c[2] += gnd
+c = cap('15pF'); c[1] += xo_net; c[2] += gnd
+
+# ============================================================
+# KSZ9477S reference resistors + reset  [REUSED]
+# ============================================================
+r = res('6.04k')                # ISET
+iset_net = Net('ISET')
+r[1] += iset_net; r[2] += gnd
+U1[127] += iset_net
+
+r = res('191')                  # S_REXT
+srext_net = Net('S_REXT')
+r[1] += srext_net; r[2] += gnd
+U1[76] += srext_net
+
+reset_net = Net('RESET_N')
+U1[96] += reset_net
+r = res('10k')                  # reset pull-up
+r[1] += vdd33; r[2] += reset_net
+c = cap('10uF', 'Capacitor_SMD:C_0805_2012Metric')
+c[1] += reset_net; c[2] += gnd
+D_rst = Part('Device', 'D', value='1N4148',
+             footprint='Diode_SMD:D_SOD-323')
+D_rst[1] += reset_net
+D_rst[2] += vdd33
+
+# ============================================================
+# SPI management nets + straps  [REUSED — now driven by V3c]
+# ============================================================
+spi_clk  = Net('SPI_CLK')
+spi_mosi = Net('SPI_MOSI')
+spi_miso = Net('SPI_MISO')
+spi_cs   = Net('SPI_CS_N')
+intrp_net = Net('INTRP_N')
+
+U1[101] += spi_clk
+U1[98]  += spi_mosi
+U1[97]  += spi_miso
+U1[100] += spi_cs
+U1[94]  += intrp_net
+
+for net, val in [(spi_mosi, '4.7k'), (spi_cs, '4.7k'),
+                 (intrp_net, '10k')]:
+  r = res(val)
+  r[1] += vdd33
+  r[2] += net
+
+pme_net = Net('PME_N')
+U1[93] += pme_net
+r = res('10k'); r[1] += vdd33; r[2] += pme_net
+
+synclko_net = Net('SYNCLKO')
+U1[95] += synclko_net
+r = res('10k'); r[1] += vdd33; r[2] += synclko_net
+
+iba_net = Net('IBA')
+U1[67] += iba_net
+r = res('1k'); r[1] += iba_net; r[2] += gnd
+
+U1[90] += Net('GPIO_1')
+
+# ============================================================
+# Ports 1-5: KSZ9477 PHY -> HR911130C GbE MagJack  [REUSED]
+# ============================================================
+PORTS = [
+  (1, [1, 2, 4, 5, 6, 7, 8, 9],       [105, 106]),
+  (2, [12, 13, 15, 16, 17, 18, 20, 21],[91, 92]),
+  (3, [24, 25, 26, 27, 28, 29, 31, 32],[88, 89]),
+  (4, [34, 35, 37, 38, 39, 40, 42, 43],[85, 86]),
+  (5, [112,113,115,116,117,118,120,121],[102,103]),
+]
+MDI_PAIRS = [('2', '3'), ('4', '7'), ('5', '6'), ('8', '9')]
+
+for port_num, phy_pins, led_pins in PORTS:
+  pn = port_num
+  rj = Part(
+    tool=SKIDL, name='HR911130C', ref_prefix='J',
+    dest=NETLIST,
+    footprint='HANRUN_HR911130A',
+    pins=[
+      Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
+      for i in range(1, 15)
+    ] + [
+      Pin(num='S1', name='SH1', func=Pin.types.PASSIVE),
+      Pin(num='S2', name='SH2', func=Pin.types.PASSIVE),
+    ])
+  rj['1']  += gnd
+  rj['10'] += gnd
+  rj['S1'] += gnd
+  rj['S2'] += gnd
+
+  pair_names = ['A', 'B', 'C', 'D']
+  for idx, (mp, mm) in enumerate(MDI_PAIRS):
+    pp = phy_pins[idx * 2]
+    pm = phy_pins[idx * 2 + 1]
+    np_ = Net(f'GBE_P{pn}_{pair_names[idx]}P')
+    nm_ = Net(f'GBE_P{pn}_{pair_names[idx]}N')
+    U1[pp] += np_
+    U1[pm] += nm_
+    rj[mp] += np_
+    rj[mm] += nm_
+
+  led0_net = Net(f'LED{pn}_0')
+  led1_net = Net(f'LED{pn}_1')
+  U1[led_pins[0]] += led0_net
+  U1[led_pins[1]] += led1_net
+  r_led0 = res('150'); r_led1 = res('150')
+  r_led0[1] += vdd33
+  r_led0[2] += Net(f'LED{pn}_0A')
+  rj['11'] += r_led0[2]
+  rj['12'] += led0_net
+  r_led1[1] += vdd33
+  r_led1[2] += Net(f'LED{pn}_1A')
+  rj['14'] += r_led1[2]
+  rj['13'] += led1_net
+
+# ============================================================
+# RMII CPU-port link: V3c EMAC <-> KSZ9477 CPU port (port 6/7)
+# ============================================================
+# The KSZ9477 CPU port runs RMII at 100M to the V3c's EMAC (the
+# V3c is 100M-class; the CPU port only carries management +
+# host-bound traffic, not line-rate inter-port switching). KSZ
+# CPU-port RMII pins are fixed by the datasheet; the V3c side is
+# the part that needs its pinout (below).
+rmii_refclk  = Net('RMII_REFCLK')
+rmii_txd0    = Net('RMII_TXD0')
+rmii_txd1    = Net('RMII_TXD1')
+rmii_txen    = Net('RMII_TXEN')
+rmii_rxd0    = Net('RMII_RXD0')
+rmii_rxd1    = Net('RMII_RXD1')
+rmii_crsdv   = Net('RMII_CRSDV')
+rmii_mdc     = Net('RMII_MDC')
+rmii_mdio    = Net('RMII_MDIO')
+
+# KSZ9477 CPU-port RMII pins — CONFIRM against DS00002392C port-6
+# RMII pin map before fab (these follow the port-6 MAC group).
+U1[48] += rmii_txd0
+U1[49] += rmii_txd1
+U1[52] += rmii_txen
+U1[53] += rmii_rxd0
+U1[54] += rmii_rxd1
+U1[55] += rmii_crsdv
+U1[57] += rmii_refclk
+U1[63] += rmii_mdio
+U1[64] += rmii_mdc
+
+# ============================================================
+# ### NEEDS V3c DATASHEET — Allwinner V3c management SoC
+# ============================================================
+# The V3c is a bare SoC with integrated DDR. It needs: core +
+# IO power rails, a 24MHz crystal, reset, the SPI master to the
+# KSZ9477, the SPI flash bus, the RMII EMAC to the CPU port, and
+# boot straps. Pin numbers below are PLACEHOLDERS (P_xxx) — they
+# MUST be replaced with real V3c ball/pin numbers from the
+# datasheet. They are deliberately not invented.
+#
+# Net wiring is correct and complete; only the V3c-side pin
+# assignments are unknown. Once the datasheet pinout is in,
+# replace each 'P_xxx' with the real designator.
+U_V3C = Part(
+  tool=SKIDL, name='V3c', ref_prefix='U',
+  dest=NETLIST,
+  footprint='TODO:V3c_QFP',   # TODO: V3c package footprint
+  pins=[
+    # Minimal functional pin set — EXPAND per datasheet.
+    Pin(num='P_VCORE', name='VCC_CORE', func=Pin.types.PWRIN),
+    Pin(num='P_VIO',   name='VCC_IO',   func=Pin.types.PWRIN),
+    Pin(num='P_VDDR',  name='VCC_DRAM', func=Pin.types.PWRIN),
+    Pin(num='P_GND',   name='GND',      func=Pin.types.PWRIN),
+    Pin(num='P_XI',    name='XTAL_IN',  func=Pin.types.INPUT),
+    Pin(num='P_XO',    name='XTAL_OUT', func=Pin.types.OUTPUT),
+    Pin(num='P_RST',   name='RESET_N',  func=Pin.types.INPUT),
+    Pin(num='P_SCLK',  name='SPI0_CLK', func=Pin.types.OUTPUT),
+    Pin(num='P_MOSI',  name='SPI0_MOSI',func=Pin.types.OUTPUT),
+    Pin(num='P_MISO',  name='SPI0_MISO',func=Pin.types.INPUT),
+    Pin(num='P_CS',    name='SPI0_CS',  func=Pin.types.OUTPUT),
+    Pin(num='P_FSCLK', name='SPI1_CLK', func=Pin.types.OUTPUT),
+    Pin(num='P_FMOSI', name='SPI1_MOSI',func=Pin.types.OUTPUT),
+    Pin(num='P_FMISO', name='SPI1_MISO',func=Pin.types.INPUT),
+    Pin(num='P_FCS',   name='SPI1_CS',  func=Pin.types.OUTPUT),
+    Pin(num='P_RTXD0', name='EMAC_TXD0',func=Pin.types.OUTPUT),
+    Pin(num='P_RTXD1', name='EMAC_TXD1',func=Pin.types.OUTPUT),
+    Pin(num='P_RTXEN', name='EMAC_TXEN',func=Pin.types.OUTPUT),
+    Pin(num='P_RRXD0', name='EMAC_RXD0',func=Pin.types.INPUT),
+    Pin(num='P_RRXD1', name='EMAC_RXD1',func=Pin.types.INPUT),
+    Pin(num='P_RCRS',  name='EMAC_CRSDV',func=Pin.types.INPUT),
+    Pin(num='P_RCLK',  name='EMAC_REFCLK',func=Pin.types.INPUT),
+    Pin(num='P_MDC',   name='EMAC_MDC', func=Pin.types.OUTPUT),
+    Pin(num='P_MDIO',  name='EMAC_MDIO',func=Pin.types.BIDIR),
+    Pin(num='P_UTX',   name='UART0_TX', func=Pin.types.OUTPUT),
+    Pin(num='P_URX',   name='UART0_RX', func=Pin.types.INPUT),
+    Pin(num='P_BOOT',  name='BOOT_SEL', func=Pin.types.INPUT),
+  ])
+
+# V3c core/IO power. V3c integrated DDR needs its own DRAM rail
+# (typ. 1.5V DDR3 or per V3c spec) — add the regulator once the
+# rail voltage is confirmed from the datasheet.
+vdd_core = Net('VDD_V3C_CORE')   # TODO: confirm core voltage
+U_V3C['P_VCORE'] += vdd_core
+U_V3C['P_VIO']   += vdd33
+U_V3C['P_VDDR']  += Net('VDD_DRAM')  # TODO: regulator + voltage
+U_V3C['P_GND']   += gnd
+
+# V3c 24MHz crystal
+Y2 = Part('Device', 'Crystal', value='24MHz',
+          footprint='Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm')
+v_xi = Net('V3C_XI'); v_xo = Net('V3C_XO')
+U_V3C['P_XI'] += v_xi
+U_V3C['P_XO'] += v_xo
+Y2[1] += v_xi; Y2[2] += v_xo
+c = cap('18pF'); c[1] += v_xi; c[2] += gnd
+c = cap('18pF'); c[1] += v_xo; c[2] += gnd
+
+# V3c reset
+v_rst = Net('V3C_RESET_N')
+U_V3C['P_RST'] += v_rst
+r = res('10k'); r[1] += vdd33; r[2] += v_rst
+c = cap('100nF'); c[1] += v_rst; c[2] += gnd
+
+# V3c SPI0 -> KSZ9477 management
+U_V3C['P_SCLK'] += spi_clk
+U_V3C['P_MOSI'] += spi_mosi
+U_V3C['P_MISO'] += spi_miso
+U_V3C['P_CS']   += spi_cs
+
+# V3c EMAC (RMII) -> KSZ9477 CPU port
+U_V3C['P_RTXD0'] += rmii_txd0
+U_V3C['P_RTXD1'] += rmii_txd1
+U_V3C['P_RTXEN'] += rmii_txen
+U_V3C['P_RRXD0'] += rmii_rxd0
+U_V3C['P_RRXD1'] += rmii_rxd1
+U_V3C['P_RCRS']  += rmii_crsdv
+U_V3C['P_RCLK']  += rmii_refclk
+U_V3C['P_MDC']   += rmii_mdc
+U_V3C['P_MDIO']  += rmii_mdio
+
+# ============================================================
+# SPI flash — V3c rootfs (SPI NAND 128MB recommended; W25N01)
+# ============================================================
+U_FLASH = Part(
+  tool=SKIDL, name='SPI_NAND', ref_prefix='U',
+  dest=NETLIST,
+  footprint='Package_SO:SOIC-8_5.23x5.23mm_P1.27mm',
+  pins=[
+    Pin(num='1', name='CS_N',  func=Pin.types.INPUT),
+    Pin(num='2', name='MISO',  func=Pin.types.OUTPUT),
+    Pin(num='3', name='WP_N',  func=Pin.types.INPUT),
+    Pin(num='4', name='GND',   func=Pin.types.PWRIN),
+    Pin(num='5', name='MOSI',  func=Pin.types.INPUT),
+    Pin(num='6', name='CLK',   func=Pin.types.INPUT),
+    Pin(num='7', name='HOLD_N',func=Pin.types.INPUT),
+    Pin(num='8', name='VCC',   func=Pin.types.PWRIN),
+  ])
+flash_clk  = Net('FLASH_CLK')
+flash_mosi = Net('FLASH_MOSI')
+flash_miso = Net('FLASH_MISO')
+flash_cs   = Net('FLASH_CS_N')
+U_FLASH['6'] += flash_clk
+U_FLASH['5'] += flash_mosi
+U_FLASH['2'] += flash_miso
+U_FLASH['1'] += flash_cs
+U_FLASH['8'] += vdd33
+U_FLASH['4'] += gnd
+r = res('10k'); r[1] += vdd33; r[2] += U_FLASH['3']  # WP# pull-up
+r = res('10k'); r[1] += vdd33; r[2] += U_FLASH['7']  # HOLD# pull-up
+c = cap('100nF'); c[1] += vdd33; c[2] += gnd
+U_V3C['P_FSCLK'] += flash_clk
+U_V3C['P_FMOSI'] += flash_mosi
+U_V3C['P_FMISO'] += flash_miso
+U_V3C['P_FCS']   += flash_cs
+
+# ============================================================
+# Console UART header (debug / serial console)
+# ============================================================
+J_UART = Part(
+  tool=SKIDL, name='Conn_01x03', ref_prefix='J',
+  dest=NETLIST,
+  footprint='Connector_PinHeader_2.54mm:'
+            'PinHeader_1x03_P2.54mm_Vertical',
+  pins=[
+    Pin(num='1', name='GND', func=Pin.types.PASSIVE),
+    Pin(num='2', name='TX',  func=Pin.types.PASSIVE),
+    Pin(num='3', name='RX',  func=Pin.types.PASSIVE),
+  ])
+uart_tx = Net('UART0_TX')
+uart_rx = Net('UART0_RX')
+J_UART['1'] += gnd
+J_UART['2'] += uart_tx
+J_UART['3'] += uart_rx
+U_V3C['P_UTX'] += uart_tx
+U_V3C['P_URX'] += uart_rx
+
+# Boot strap (pull to select SPI boot — confirm polarity)
+r = res('10k'); r[1] += vdd33; r[2] += U_V3C['P_BOOT']
+
+# ============================================================
+# Generate netlist
+# ============================================================
+generate_netlist(file_='netlist_s105.net')
+
+# Post-process: stable timestamps/tags by ref designator.
+import re, hashlib, uuid
+
+with open('netlist_s105.net', 'r') as f:
+  content = f.read()
+
+counter = [0]
+def stable_replace_tstamp(m):
+  counter[0] += 1
+  h = hashlib.md5(f'tstamp_{counter[0]}'.encode()).hexdigest()
+  return f'(tstamps "{uuid.UUID(h)}")'
+
+counter_tag = [0]
+def stable_replace_tag(m):
+  counter_tag[0] += 1
+  return f'(name "SKiDL Tag") "tag_{counter_tag[0]}")'
+
+content = re.sub(r'\(tstamps "[^"]+"\)', stable_replace_tstamp,
+                 content)
+content = re.sub(r'\(name "SKiDL Tag"\) "[^"]+"\)',
+                 stable_replace_tag, content)
+
+with open('netlist_s105.net', 'w') as f:
+  f.write(content)
+
+print(f"Netlist generated: C1-C{_cref[0]}, R1-R{_rref[0]}")
+print("WARNING: V3c pin numbers are placeholders (P_xxx) — "
+      "replace from the V3c datasheet before fab.")
+print("Import into KiCad: File -> Import -> Netlist")
