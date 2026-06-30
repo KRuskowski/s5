@@ -1,8 +1,6 @@
 # s105 Hardware — 5-Port Managed Switch Board
 
-KiCad + SkiDL hardware for the s105 (S501) switch. Ported from
-`f.appliance` (the firewall carrier), reusing the KSZ9477, the 5 GbE
-MagJacks, the power tree, and SPI management.
+KiCad + SKiDL hardware for the s105 (S501) switch.
 
 ## Generating the netlist
 
@@ -12,52 +10,39 @@ export KICAD8_SYMBOL_DIR=/usr/share/kicad/symbols
 python netlistscript          # writes netlist_s105.net
 ```
 
-(Uses the f.appliance SkiDL venv, or any venv with `skidl`
-installed. Import the result into KiCad: File → Import → Netlist.)
+Import the result into KiCad: File -> Import -> Netlist.
 
 ## What's on the board
 
-| Block | Part | Source |
+| Block | Part | Notes |
 |---|---|---|
-| Switch ASIC | KSZ9477S (128-TQFP) | reused from f.appliance |
-| 5× GbE ports | HR911130C MagJacks | reused |
-| Power tree | 5V → 3V3 → 2V5 → 1V2 (AMS1117) | reused |
-| Power input | 5V barrel jack | new (replaces f.appliance USB-C PD) |
-| Management SoC | Allwinner V3c | **new — pinout TODO** |
-| Rootfs storage | SPI NAND 128 MB (W25N01-class) | new |
-| CPU-port link | V3c EMAC ↔ KSZ9477 CPU port (RMII, 100M) | new |
-| Console | 3-pin UART header | new |
+| Management SoC | **Allwinner T113-S3** (eLQFP128, SiP 128MB DDR3) | No external DRAM routing. Real pin numbers from datasheet v1.6 (see `T113S3_PINMAP.md`). |
+| Switch ASIC | KSZ9477S (128-TQFP) | 5 copper GbE PHY ports + RGMII CPU port (port 6). Mainline DSA (`microchip,ksz9477`). |
+| CPU-port link | T113 EMAC (RGMII, PG bank) -> KSZ port 6 | MAC-to-MAC, no magnetics, frees all 5 copper ports for users. |
+| 5x GbE ports | Discrete GbE magnetics (YDS 30F-51NL) + plain RJ45 | Full 1000BASE-T (4 pairs/port). |
+| PoE PSE | 2x TPS23861 (4ch each), all 5 ports | 48V DC in, N-FET + sense per port. |
+| Power input | 48V DC -> TPS54560 buck (5V) | LDO chain: 3.3/2.5/1.2V (KSZ) + 0.9V buck (T113 core) + 1.8V LDO (DRAM). |
+| Boot flash | W25Q128 SPI NOR (SOIC-8) | Shared SPI0 bus; flash CS on PC3, KSZ CS via GPIO. |
+| Watchdog | TPS3823-33 (SOT-23-5) | RST -> T113 RESET, WDI from T113 GPIO. |
+| Console | 3-pin UART header | T113 UART0 (PE2/PE3). |
+| USB | USB-C (GCT USB4110) | Device mode for debug/FEL. |
+| Stackup | **4-layer** | No external DDR3 = no high-speed signal layer needed. |
 
-## Removed from the f.appliance design
+## Key design files
 
-- **LAN7431** PCIe-to-RGMII NIC — the firewall used it to bridge the
-  switch into the host's data path. The s105 switch has no host data
-  path; the V3c is management-only.
-- **PCIe FPC connector** — went with the LAN7431.
-- **Cubie A7S mount** — replaced by the on-board V3c.
-- **USB-C PD (STUSB4500)** — a switch is adapter-powered; barrel
-  jack is simpler.
+| File | Description |
+|---|---|
+| `netlistscript` | SKiDL connection script (the source of truth) |
+| `netlist_s105.net` | Generated netlist (0 errors) |
+| `T113S3_PINMAP.md` | T113-S3 pin map extracted from datasheet v1.6 |
 
-## ⚠️ Before this netlist is trustworthy
+## Open TODOs (marked in-script)
 
-The **V3c pin numbers are placeholders** (`P_xxx`). The net wiring is
-complete and correct — SPI0 to the KSZ9477, SPI1 to the flash, RMII
-to the CPU port, crystal, reset, UART, power — but the V3c-side pin
-assignments are NOT real. They were deliberately not invented;
-fabricating pin numbers is how a board silently fails at assembly.
-
-To finish:
-1. Get the V3c datasheet pinout. Replace every `P_xxx` in the
-   `### NEEDS V3c DATASHEET` section with real ball/pin designators.
-2. Confirm the V3c core voltage and the integrated-DDR rail voltage;
-   add the missing core + DRAM regulators (only 3V3/2V5/1V2 for the
-   switch exist today).
-3. Add the V3c package footprint (`footprint='TODO:V3c_QFP'`).
-4. Confirm the KSZ9477 CPU-port RMII pin map against DS00002392C
-   (port-6 MAC group) — the RMII pins on U1 are a best-effort from
-   the port-6 group and should be checked.
-5. Confirm the SPI NAND part + the V3c BSP boots from SPI NAND
-   (vs NOR) — affects U-Boot.
-
-Everything except the V3c-side pins is production-shaped and matches
-the proven f.appliance blocks.
+1. T113 eLQFP128 **exposed pad** -> GND is mandatory (only one
+   dedicated GND pin: AGND=91). Add EP in the footprint.
+2. RGMII CLKIN 25MHz reference source (KSZ SYNCLKO or crystal).
+3. Unused analog rails (VCC-LVDS/HPVCC/TVOUT/TVIN) — confirm
+   per datasheet §5.3 whether they may be left unpowered.
+4. AVCC filtering (ferrite bead recommended per datasheet).
+5. T113 package footprint (`eLQFP128_14x14x1.4mm`) — confirm
+   or create.
