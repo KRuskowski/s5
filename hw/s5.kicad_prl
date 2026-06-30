@@ -1,7 +1,7 @@
 {
   "board": {
     "active_layer": 0,
-    "active_layer_preset": "",
+    "active_layer_preset": "All Layers",
     "auto_track_width": true,
     "hidden_netclasses": [],
     "hidden_nets": [],
@@ -101,7 +101,20 @@
   },
   "open_jobsets": [],
   "project": {
-    "files": []
+    "files": [
+      {
+        "name": "s5.kicad_pcb",
+        "open": false,
+        "window": {
+          "display": 2,
+          "maximized": true,
+          "pos_x": 1680,
+          "pos_y": 0,
+          "size_x": 1280,
+          "size_y": 618
+        }
+      }
+    ]
   },
   "schematic": {
     "selection_filter": {

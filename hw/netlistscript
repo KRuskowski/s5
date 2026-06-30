@@ -3,8 +3,8 @@
 V5: 5-port managed GbE PoE switch with Allwinner T113-S3.
 
 KSZ9477S 7-port switch:
-  - Ports 1-5: 10/100/1000 copper PHY -> discrete GbE magnetics
-    (YDS 30F-51NL) -> plain RJ45 jack, with PoE PSE injection.
+  - Ports 1-5: 10/100/1000 copper PHY -> LPJG0926HENL PoE+
+    GbE MagJack (integrated magnetics + LEDs + PoE center taps).
   - Port 6: RGMII (MAC) -> Allwinner T113-S3 (management CPU).
   - Port 7: SGMII/SerDes -> left unused (terminated, S_REXT kept).
 
@@ -29,8 +29,14 @@ NOTE: only ONE dedicated T113 ground pin (AGND=91); the eLQFP128
 exposed pad is the main GND return -- EP->GND is mandatory.
 """
 
+import os, glob
+# Delete any cached SKiDL backup lib to prevent stale part defs
+# from overriding the inline Part() definitions below.
+_here = os.path.dirname(os.path.abspath(__file__))
+for _f in glob.glob(os.path.join(_here, '*_sklib.py')):
+  os.remove(_f)
+
 from skidl import *
-import os
 
 # ============================================================
 # Stable ref counters
@@ -132,8 +138,8 @@ gnd   = Net('GND')
 J1 = Part(
   tool=SKIDL, name='Conn_01x02', ref_prefix='J',
   dest=NETLIST,
-  footprint='Connector_PinHeader_2.54mm:'
-            'PinHeader_1x02_P2.54mm_Vertical',
+  footprint='TerminalBlock_Phoenix:'
+            'TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal',
   pins=[
     Pin(num='1', name='VIN', func=Pin.types.PASSIVE),
     Pin(num='2', name='GND', func=Pin.types.PASSIVE),
@@ -403,12 +409,21 @@ U1[81] += Net('S_OUT7P')
 U1[82] += Net('S_OUT7M')
 
 # ============================================================
-# Ports 1-5: KSZ PHY -> discrete GbE magnetics ->
-#   plain RJ45 jack, with PoE PSE injection.
-# Each port uses all 4 pairs (A,B,C,D) = full 1000BASE-T.
+# Ports 1-5: KSZ PHY -> LPJG0926HENL PoE+ GbE MagJack.
+# Integrated magnetics + LEDs + PoE center taps in one part.
+# Each port uses all 4 pairs = full 1000BASE-T.
+#
+# LPJG0926HENL pinout (20 pins):
+#   1=TD1+, 2=TD1-, 3=TD2+, 6=TD2-, 7=TD3+, 8=TD3-,
+#   9=TD4+, 10=TD4-  (chip/PHY side MDI pairs)
+#   4,5 = chip-side center taps (100nF to GND)
+#   11=VC1, 12=VC2   (line-side CT, PoE V+)
+#   13=VC3, 14=VC4   (line-side CT, PoE return)
+#   15=GRN+, 16=GRN- (green LED)
+#   17=YEL+, 18=YEL- (yellow LED)
+#   S1,S2 = shield
 # ============================================================
-# KSZ MDI pins per port (P*P_x / P*M_x), pairs A,B,C,D:
-#   pairs given as (P+, M-) KSZ pin numbers.
+# KSZ MDI pins per port, pairs 1-4:
 KSZ_PORT_MDI = {
   1: [(1, 2),   (4, 5),   (6, 7),   (8, 9)],
   2: [(12, 13), (15, 16), (17, 18), (20, 21)],
@@ -416,74 +431,64 @@ KSZ_PORT_MDI = {
   4: [(34, 35), (37, 38), (39, 40), (42, 43)],
   5: [(112, 113), (115, 116), (117, 118), (120, 121)],
 }
+# MagJack chip-side MDI pin pairs (TD1..TD4 +/-)
+MJ_P = [1, 3, 7, 9]    # TD1+, TD2+, TD3+, TD4+
+MJ_N = [2, 6, 8, 10]   # TD1-, TD2-, TD3-, TD4-
 PAIR = ['A', 'B', 'C', 'D']
 
-# Discrete GbE transformer (YDS 30F-51NL, SO-24) pinout:
-PHY_P  = [1, 4, 7, 10]      # A+,B+,C+,D+ (chip side)
-PHY_N  = [3, 6, 9, 12]      # A-,B-,C-,D-
-PHY_CT = [2, 5, 8, 11]      # chip-side center taps
-LINE_P = [24, 21, 18, 15]   # A+,B+,C+,D+ (line side)
-LINE_N = [22, 19, 16, 13]   # A-,B-,C-,D-
-LINE_CT = [23, 20, 17, 14]  # line-side center taps (PoE)
-
-# Plain RJ45 jack (RJHSE5380), T568B pin order:
-#   J1=A+,J2=A-,J3=B+,J4=C+,J5=C-,J6=B-,J7=D+,J8=D-
-# Map jack pin -> (pair index, polarity '+'/'-')
-JACK_MAP = [
-  (1, 0, '+'), (2, 0, '-'), (3, 1, '+'), (4, 2, '+'),
-  (5, 2, '-'), (6, 1, '-'), (7, 3, '+'), (8, 3, '-'),
-]
+# KSZ LED pins per port
+KSZ_LEDS = {
+  1: (105, 106), 2: (91, 92), 3: (88, 89),
+  4: (85, 86),   5: (102, 103),
+}
 
 # PoE supply nets per port (from PSE FET section below)
 poe_vp = {p: Net(f'POE_VP_{p}') for p in range(1, 6)}
 
-port_jacks = {}
 for pn in range(1, 6):
-  # Transformer
-  t = Part(
-    tool=SKIDL, name='GBE_XFMR', ref_prefix='T', dest=NETLIST,
-    footprint='Transformer_SMD:'
-              'Transformer_Ethernet_YDS_30F-51NL_SO-24_7.1x15.1mm',
-    pins=[Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
-          for i in range(1, 25)])
-  t.ref = f'T{pn}'
-  # Plain RJ45 jack
   j = Part(
-    tool=SKIDL, name='RJ45', ref_prefix='J', dest=NETLIST,
-    footprint='Connector_RJ:RJ45_Amphenol_RJHSE5380',
+    tool=SKIDL, name='LPJG0926HENL', ref_prefix='J', dest=NETLIST,
+    footprint='connectors:LPJG0926HENL',
     pins=[Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
-          for i in range(1, 9)]
-         + [Pin(num='SH', name='SH', func=Pin.types.PASSIVE)])
+          for i in range(1, 19)]
+         + [Pin(num='S1', name='SH1', func=Pin.types.PASSIVE),
+            Pin(num='S2', name='SH2', func=Pin.types.PASSIVE)])
   j.ref = f'J{pn + 1}'   # J2..J6
-  port_jacks[pn] = j
 
-  # KSZ PHY pairs -> transformer chip side
+  # KSZ PHY pairs -> magjack chip-side MDI
   for idx in range(4):
     pp, pm = KSZ_PORT_MDI[pn][idx]
     np_ = Net(f'P{pn}_{PAIR[idx]}P')
     nm_ = Net(f'P{pn}_{PAIR[idx]}N')
     U1[pp] += np_; U1[pm] += nm_
-    t[PHY_P[idx]] += np_; t[PHY_N[idx]] += nm_
-  # Chip-side center taps: 100nF to GND
-  for idx in range(4):
-    ct = Net(f'P{pn}_{PAIR[idx]}_CT')
-    t[PHY_CT[idx]] += ct
-    c = cap('100nF'); c[1] += ct; c[2] += gnd
+    j[MJ_P[idx]] += np_; j[MJ_N[idx]] += nm_
 
-  # Line-side center taps: PoE Mode A (V+ on pairs A,B;
-  # return on pairs C,D)
-  t[LINE_CT[0]] += poe_vp[pn]   # A_CT
-  t[LINE_CT[1]] += poe_vp[pn]   # B_CT
-  t[LINE_CT[2]] += gnd          # C_CT return
-  t[LINE_CT[3]] += gnd          # D_CT return
+  # Chip-side center taps (pins 4,5): 100nF to GND
+  ct1 = Net(f'P{pn}_CT1'); j[4] += ct1
+  c = cap('100nF'); c[1] += ct1; c[2] += gnd
+  ct2 = Net(f'P{pn}_CT2'); j[5] += ct2
+  c = cap('100nF'); c[1] += ct2; c[2] += gnd
 
-  # Transformer line side -> RJ45 jack
-  for jpin, idx, pol in JACK_MAP:
-    mag = t[LINE_P[idx]] if pol == '+' else t[LINE_N[idx]]
-    net = Net(f'P{pn}_LINE_{jpin}')
-    mag += net; j[jpin] += net
-  # Jack shield to GND (chassis via cap could be added in layout)
-  j['SH'] += gnd
+  # Line-side center taps: PoE Mode A
+  # VC1+VC2 (pins 11,12) -> 48V from PSE
+  # VC3+VC4 (pins 13,14) -> return (GND)
+  j[11] += poe_vp[pn]; j[12] += poe_vp[pn]
+  j[13] += gnd;        j[14] += gnd
+
+  # LEDs: KSZ LED0 -> green (pins 15,16),
+  #        KSZ LED1 -> yellow (pins 17,18)
+  # KSZ LED pins are active-low open-drain sinks.
+  # MagJack LEDs have internal limiting? No — add series R.
+  led0, led1 = KSZ_LEDS[pn]
+  grn = Net(f'P{pn}_GRN'); U1[led0] += grn
+  r = res('150'); r[1] += vdd33; r[2] += j[15]  # GRN anode
+  j[16] += grn                                   # GRN cathode
+  yel = Net(f'P{pn}_YEL'); U1[led1] += yel
+  r = res('150'); r[1] += vdd33; r[2] += j[17]  # YEL anode
+  j[18] += yel                                   # YEL cathode
+
+  # Shield
+  j['S1'] += gnd; j['S2'] += gnd
 
 # ============================================================
 # Port 6: KSZ RGMII (MAC) <-> H3 RGMII. Digital, no magnetics.
@@ -505,21 +510,9 @@ U1[63] += rg_rxd[2]; U1[62] += rg_rxd[3]
 U1[48] += rg_tx_clk; U1[57] += rg_rx_clk
 U1[49] += rg_tx_ctl; U1[58] += rg_rx_ctl
 
-# ============================================================
-# Per-port Ethernet LEDs (KSZ LED pins, active-low sink)
-# Ports 1-3: (105,106)(91,92)(88,89); 4:(85,86); 5:(102,103)
-# ============================================================
-ETH_LEDS = [
-  (1, 105, 106), (2, 91, 92), (3, 88, 89),
-  (4, 85, 86),   (5, 102, 103),
-]
-for port, l0, l1 in ETH_LEDS:
-  for lpin, sfx in [(l0, '0'), (l1, '1')]:
-    ln = Net(f'ETH_LED{port}_{sfx}')
-    an = Net(f'ETH_LED{port}_{sfx}_A')
-    U1[lpin] += ln
-    r = res('270'); r[1] += vdd33; r[2] += an
-    d = led(); d[1] += an; d[2] += ln
+# Per-port LEDs are now inside the LPJG0926HENL magjacks above.
+# KSZ LED pins wired directly to magjack LED cathodes (with
+# series resistors to 3.3V on the anode side).
 
 # ============================================================
 # PoE PSE -- 2x TPS23861 (TSSOP-28). 4 channels each.
@@ -712,7 +705,7 @@ _t113_pins.append(Pin(num='129', name='EP', func=Pin.types.PASSIVE))
 
 U7 = Part(
   tool=SKIDL, name='T113-S3', ref_prefix='U', dest=NETLIST,
-  footprint='Package_QFP:LQFP-128_14x14mm_P0.4mm',
+  footprint='chips:eLQFP-128-1EP_14x14mm_P0.4mm',
   pins=_t113_pins)
 U7.ref = 'U7'
 
@@ -957,10 +950,10 @@ tc('PB7', stat)
 # ============================================================
 # Generate netlist
 # ============================================================
-generate_netlist(file_='netlist_s5_v5.net')
+generate_netlist(file_='netlist_s5.net')
 
 import re, hashlib, uuid
-with open('netlist_s5_v5.net', 'r') as f:
+with open('netlist_s5.net', 'r') as f:
   content = f.read()
 counter = [0]
 def stable_replace_tstamp(m):
@@ -975,7 +968,7 @@ content = re.sub(r'\(tstamps "[^"]+"\)',
                  stable_replace_tstamp, content)
 content = re.sub(r'\(name "SKiDL Tag"\) "[^"]+"\)',
                  stable_replace_tag, content)
-with open('netlist_s5_v5.net', 'w') as f:
+with open('netlist_s5.net', 'w') as f:
   f.write(content)
 
 print(f"Netlist generated: C1-C{_cref[0]}, R1-R{_rref[0]}, "

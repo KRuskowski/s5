@@ -265,7 +265,7 @@
     "last_paths": {
       "gencad": "",
       "idf": "",
-      "netlist": "../hw/netlist_s5.net",
+      "netlist": "netlist_s5.net",
       "plot": "",
       "pos_files": "",
       "specctra_dsn": "",
