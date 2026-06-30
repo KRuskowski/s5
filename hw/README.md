@@ -1,13 +1,13 @@
-# s105 Hardware — 5-Port Managed Switch Board
+# s5 Hardware — 5-Port Managed Switch Board
 
-KiCad + SKiDL hardware for the s105 (S501) switch.
+KiCad + SKiDL hardware for the s5 (S501) switch.
 
 ## Generating the netlist
 
 ```sh
 export KICAD_SYMBOL_DIR=/usr/share/kicad/symbols
 export KICAD8_SYMBOL_DIR=/usr/share/kicad/symbols
-python netlistscript          # writes netlist_s105.net
+python netlistscript          # writes netlist_s5.net
 ```
 
 Import the result into KiCad: File -> Import -> Netlist.
@@ -33,7 +33,7 @@ Import the result into KiCad: File -> Import -> Netlist.
 | File | Description |
 |---|---|
 | `netlistscript` | SKiDL connection script (the source of truth) |
-| `netlist_s105.net` | Generated netlist (0 errors) |
+| `netlist_s5.net` | Generated netlist (0 errors) |
 | `T113S3_PINMAP.md` | T113-S3 pin map extracted from datasheet v1.6 |
 
 ## Open TODOs (marked in-script)

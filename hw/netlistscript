@@ -957,10 +957,10 @@ tc('PB7', stat)
 # ============================================================
 # Generate netlist
 # ============================================================
-generate_netlist(file_='netlist_s105_v5.net')
+generate_netlist(file_='netlist_s5_v5.net')
 
 import re, hashlib, uuid
-with open('netlist_s105_v5.net', 'r') as f:
+with open('netlist_s5_v5.net', 'r') as f:
   content = f.read()
 counter = [0]
 def stable_replace_tstamp(m):
@@ -975,7 +975,7 @@ content = re.sub(r'\(tstamps "[^"]+"\)',
                  stable_replace_tstamp, content)
 content = re.sub(r'\(name "SKiDL Tag"\) "[^"]+"\)',
                  stable_replace_tag, content)
-with open('netlist_s105_v5.net', 'w') as f:
+with open('netlist_s5_v5.net', 'w') as f:
   f.write(content)
 
 print(f"Netlist generated: C1-C{_cref[0]}, R1-R{_rref[0]}, "

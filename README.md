@@ -1,4 +1,4 @@
-# einheit s105 — 5-Port Managed Switch (product SKU: S501)
+# einheit s5 — 5-Port Managed Switch (product SKU: S501)
 
 The simplest member of the `s1xx` Linux-switch family. A 5-port
 gigabit managed switch: an Allwinner T113-S3 runs the Linux management
@@ -12,9 +12,9 @@ pattern, cheaper hardware, trimmed to the simplest 5-port config.
 |---|---|---|---|---|
 | `s` | RP2040 (bare metal) | KSZ8795 (SPI) | `cli/core` (C11) | Tiny embedded switch, serial CLI only |
 | `s100` | Linux | KSZ9567 (DSA) | full `einheit-cli` | Linux switch CLI, 7-port |
-| **`s105`** | **T113-S3 (Linux)** | **KSZ9477 (DSA)** | **full `einheit-cli` + UI** | **Simplest 5-port managed switch** |
+| **`s5`** | **T113-S3 (Linux)** | **KSZ9477 (DSA)** | **full `einheit-cli` + UI** | **Simplest 5-port managed switch** |
 
-s105 is essentially `s100`'s software retargeted: same DSA-based
+s5 is essentially `s100`'s software retargeted: same DSA-based
 switch adapter, same einheit-cli framework, on cheaper T113-S3 hardware
 with the 5-port KSZ9477 instead of the 7-port KSZ9567. Much of
 `s100/src/` (the DSA driver, switch adapter, sys/util) ports
@@ -42,13 +42,13 @@ Reuses the einheit stack:
 - **CLI** — `einheit-cli` adapter (`switch_adapter.cc`) driving the
   switch via DSA. Ports directly from `s100`.
 - **Web UI** — `einheit-ui` adapter for port status, VLAN config,
-  statistics. (s100 has no UI yet; s105 adds it — the T113-S3 has the
+  statistics. (s100 has no UI yet; s5 adds it — the T113-S3 has the
   headroom.)
 - **No ZMQ** — local transport, the management binary reads switch
   state in-process (`EINHEIT_NO_ZMQ=ON`, like s100).
 
 ### Rootfs strategy
-SPI flash is too small for Debian. s105 uses a **Buildroot/OpenWrt
+SPI flash is too small for Debian. s5 uses a **Buildroot/OpenWrt
 minimal rootfs** (squashfs in flash) — a different image pipeline
 from the firewall (T527 + eMMC + Debian). The einheit-cli C++ stack
 + UI assets set the flash floor.
