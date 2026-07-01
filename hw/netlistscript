@@ -204,9 +204,10 @@ U_BOOST[21] += gnd          # EP
 U_BOOST[1]  += gnd          # DEMB (GND = forced CCM)
 U_BOOST[8]  += gnd          # SYNC (GND = internal clock)
 # VCC bypass
-decouple(Net('BOOST_VCC'), gnd, 1, '4.7uF',
+boost_vcc = Net('BOOST_VCC')
+decouple(boost_vcc, gnd, 1, '4.7uF',
          'Capacitor_SMD:C_0805_2012Metric')
-U_BOOST[10] += Net('BOOST_VCC')
+U_BOOST[10] += boost_vcc
 # Bootstrap cap
 bst_net = Net('BST_BOOST')
 U_BOOST[11] += bst_net
@@ -222,19 +223,22 @@ U_BOOST[14] += Net('BOOST_LO')   # low-side gate
 U_BOOST[16] += Net('BOOST_CSP')  # sense +
 U_BOOST[20] += Net('BOOST_CSN')  # sense -
 # Soft-start
-c = cap('100nF'); c[1] += Net('BOOST_SS'); c[2] += gnd
-U_BOOST[7] += Net('BOOST_SS')
+boost_ss = Net('BOOST_SS')
+c = cap('100nF'); c[1] += boost_ss; c[2] += gnd
+U_BOOST[7] += boost_ss
 # Frequency set (200kHz: RT ~150k per datasheet)
-r = res('150k'); r[1] += Net('BOOST_RT'); r[2] += gnd
-U_BOOST[6] += Net('BOOST_RT')
+boost_rt = Net('BOOST_RT')
+r = res('150k'); r[1] += boost_rt; r[2] += gnd
+U_BOOST[6] += boost_rt
 # UVLO: set for 20V turn-on (divider from VIN)
 uvlo_net = Net('BOOST_UVLO')
 U_BOOST[9] += uvlo_net
 r = res('100k'); r[1] += vin24; r[2] += uvlo_net
 r = res('6.8k'); r[1] += uvlo_net; r[2] += gnd
 # ILIM: set with resistor to GND (per datasheet)
-r = res('33k'); r[1] += Net('BOOST_ILIM'); r[2] += gnd
-U_BOOST[2] += Net('BOOST_ILIM')
+boost_ilim = Net('BOOST_ILIM')
+r = res('33k'); r[1] += boost_ilim; r[2] += gnd
+U_BOOST[2] += boost_ilim
 # FB divider for 48V output (1.227V ref):
 # R_top/R_bot = (48-1.227)/1.227 = 38.1 -> 383k/10k
 boost_fb = Net('BOOST_FB'); U_BOOST[4] += boost_fb
@@ -246,8 +250,9 @@ r = res('10k'); r[1] += boost_comp
 bc_mid = Net('BOOST_COMP_MID'); r[2] += bc_mid
 c = cap('10nF'); c[1] += bc_mid; c[2] += gnd
 # Power good (open drain, pull up)
-r = res('100k'); r[1] += vin24; r[2] += Net('BOOST_PG')
-U_BOOST[19] += Net('BOOST_PG')
+boost_pg = Net('BOOST_PG')
+r = res('100k'); r[1] += vin24; r[2] += boost_pg
+U_BOOST[19] += boost_pg
 # Boost output inductor (10uH, high current)
 l = inductor('10uH', 'Inductor_SMD:L_1210_3225Metric')
 l[1] += vin24; l[2] += boost_sw
