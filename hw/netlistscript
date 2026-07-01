@@ -594,10 +594,14 @@ for pn in range(1, 6):
   # MagJack LEDs have internal limiting? No — add series R.
   led0, led1 = KSZ_LEDS[pn]
   grn = Net(f'P{pn}_GRN'); U1[led0] += grn
-  r = res('150'); r[1] += vdd33; r[2] += j[15]  # GRN anode
+  grn_a = Net(f'P{pn}_GRN_A')
+  r = res('150'); r[1] += vdd33; r[2] += grn_a
+  j[15] += grn_a                                 # GRN anode
   j[16] += grn                                   # GRN cathode
   yel = Net(f'P{pn}_YEL'); U1[led1] += yel
-  r = res('150'); r[1] += vdd33; r[2] += j[17]  # YEL anode
+  yel_a = Net(f'P{pn}_YEL_A')
+  r = res('150'); r[1] += vdd33; r[2] += yel_a
+  j[17] += yel_a                                 # YEL anode
   j[18] += yel                                   # YEL cathode
 
   # Shield
@@ -839,7 +843,9 @@ tc('AGND', gnd)
 U7['129'] += gnd           # exposed pad = GND (MANDATORY)
 tc('LDO-IN', vdd33)
 for _n in ['LDOA-OUT', 'LDOB-OUT']:   # internal LDO outs: bypass
-  c = cap('1uF'); c[1] += U7[_T113_NAME2BALL[_n]]; c[2] += gnd
+  _ldo = Net(f'T113_{_n.replace("-","_")}')
+  U7[_T113_NAME2BALL[_n]] += _ldo
+  c = cap('1uF'); c[1] += _ldo; c[2] += gnd
 # Unused analog/video supply rails -- TODO confirm against
 # datasheet 5.3 whether these may be left unpowered; named nets
 # (not grounded) so the intent is explicit, not silent.
@@ -1047,26 +1053,29 @@ SW2[2] += gnd
 J_USB = Part(
   tool=SKIDL, name='USB_C_Receptacle', ref_prefix='J',
   dest=NETLIST,
-  footprint='Connector_USB:USB_C_Receptacle_GCT_USB4110',
+  footprint='connectors:USB_C_GCT_USB4110',
   pins=[
-    Pin(num='A1',  name='GND',  func=Pin.types.PWRIN),
-    Pin(num='A4',  name='VBUS', func=Pin.types.PWRIN),
+    Pin(num='A1',  name='GND1', func=Pin.types.PWRIN),
+    Pin(num='A4',  name='VBUS1',func=Pin.types.PWRIN),
     Pin(num='A5',  name='CC1',  func=Pin.types.BIDIR),
     Pin(num='A6',  name='DP1',  func=Pin.types.BIDIR),
     Pin(num='A7',  name='DN1',  func=Pin.types.BIDIR),
     Pin(num='A8',  name='SBU1', func=Pin.types.PASSIVE),
-    Pin(num='A9',  name='VBUS3',func=Pin.types.PWRIN),
-    Pin(num='B4',  name='VBUS2',func=Pin.types.PWRIN),
+    Pin(num='A9',  name='VBUS2',func=Pin.types.PWRIN),
+    Pin(num='A12', name='GND2', func=Pin.types.PWRIN),
     Pin(num='B5',  name='CC2',  func=Pin.types.BIDIR),
     Pin(num='B6',  name='DP2',  func=Pin.types.BIDIR),
     Pin(num='B7',  name='DN2',  func=Pin.types.BIDIR),
     Pin(num='B8',  name='SBU2', func=Pin.types.PASSIVE),
-    Pin(num='B9',  name='VBUS4',func=Pin.types.PWRIN),
     Pin(num='S1',  name='SH1',  func=Pin.types.PASSIVE),
   ])
 J_USB.ref = 'J12'
-J_USB['A1'] += gnd
-J_USB['S1'] += gnd
+J_USB['A1']  += gnd        # GND (shared A1/B12 pad)
+J_USB['A12'] += gnd        # GND (shared A12/B1 pad)
+usb_vbus = Net('USB_VBUS')
+J_USB['A4']  += usb_vbus   # VBUS (shared A4/B9 pad)
+J_USB['A9']  += usb_vbus   # VBUS (shared A9/B4 pad)
+J_USB['S1']  += gnd
 usb_cdp = Net('USB_CONN_DP'); usb_cdm = Net('USB_CONN_DM')
 J_USB['A6'] += usb_cdp; J_USB['B6'] += usb_cdp
 J_USB['A7'] += usb_cdm; J_USB['B7'] += usb_cdm
