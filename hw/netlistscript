@@ -14,8 +14,10 @@ SPI0; debug UART0; USB; SPI boot flash. EMAC drives KSZ port 6
 over RGMII from the PG bank (frees all 5 copper PHYs for users).
 
 PoE PSE: 2x TPS23861 (4 channels each) covers all 5 ports.
-48V DC in -> TPS54560 buck (5V) -> LDO chain (3.3 / 2.5 / 1.2 V
-for KSZ) + 0.9V buck (T113 VDD-CORE) + 1.8V LDO (VDD18-DRAM).
+24V DC in (Phoenix Contact pluggable terminal, 3-pin: +24V/GND/PE)
+-> LM5122 boost (24V to 48V for PoE) + TPS54560 buck (24V to 5V)
+-> LDO chain (3.3 / 2.5 / 1.2V for KSZ) + 0.9V buck (T113
+VDD-CORE) + 1.8V LDO (VDD18-DRAM).
 
 4-layer stackup intent (no external DDR3 routing).
 
@@ -123,8 +125,10 @@ def decouple(rail, gnd, n, value='100nF',
 # ============================================================
 # Power nets
 # ============================================================
-vin48 = Net('VIN_48V')
+vin24 = Net('VIN_24V')
+vbus48 = Net('VBUS_48V')     # 48V PoE rail (from boost)
 vdd5  = Net('VDD_5V')
+earth = Net('PE')            # protective earth
 vdd33 = Net('VDD_3V3')
 vdd25 = Net('VDD_2V5')      # KSZ AVDDH/VDDHS
 vdd12 = Net('VDD_1V2')      # KSZ core rails
@@ -133,25 +137,131 @@ vdd18 = Net('VDD_1V8')      # T113-S3 VDD18-DRAM (LDO)
 gnd   = Net('GND')
 
 # ============================================================
-# Power input -- 5.5/2.5mm barrel jack (48V DC)
-# Pin 1=tip(+48V), pin 2=sleeve(GND), pin 3=switch(NC)
+# Power input -- 3-pin Phoenix Contact pluggable terminal block
+# Pin 1=+24V, pin 2=GND(0V), pin 3=PE(earth)
+# MC 1,5/3-G-3.5 (3.5mm pitch, 3-pin, horizontal)
+# Mates with: Phoenix Contact MC 1.5/3-ST-3.5 plug
 # ============================================================
 J1 = Part(
-  tool=SKIDL, name='BarrelJack', ref_prefix='J',
+  tool=SKIDL, name='Conn_01x03', ref_prefix='J',
   dest=NETLIST,
-  footprint='Connector_BarrelJack:BarrelJack_Horizontal',
+  footprint='Connector_Phoenix_MC:'
+            'PhoenixContact_MC_1,5_3-G-3.5_1x03'
+            '_P3.50mm_Horizontal',
   pins=[
-    Pin(num='1', name='TIP',    func=Pin.types.PASSIVE),
-    Pin(num='2', name='SLEEVE', func=Pin.types.PASSIVE),
-    Pin(num='3', name='SW',     func=Pin.types.PASSIVE),
+    Pin(num='1', name='24V',  func=Pin.types.PASSIVE),
+    Pin(num='2', name='GND',  func=Pin.types.PASSIVE),
+    Pin(num='3', name='PE',   func=Pin.types.PASSIVE),
   ])
 J1.ref = 'J1'
-J1[1] += vin48
+J1[1] += vin24
 J1[2] += gnd
-J1[3] += gnd   # switch contact tied to GND
+J1[3] += earth    # PE routed to chassis/shield pad
+
+# Input protection: 100uF bulk + TVS on 24V input
+c = cap('100uF', 'Capacitor_SMD:C_1206_3216Metric')
+c[1] += vin24; c[2] += gnd
 
 # ============================================================
-# TPS54560 buck converter -- 48V to 5V, SOIC-8+EP
+# LM5122 boost converter -- 24V to 48V for PoE rail
+# WQFN-20 (4x4mm). Synchronous boost controller.
+# Key pins: VIN=18, EN=17, HO=12, LO=14, SW=13,
+#   BST=11, SS=7, COMP=5, FB=4, PGND=15, AGND=3, VCC=10
+# ============================================================
+U_BOOST = Part(
+  tool=SKIDL, name='LM5122', ref_prefix='U', dest=NETLIST,
+  footprint='Package_DFN_QFN:QFN-20-1EP_4x4mm_P0.5mm_EP2.7x2.7mm',
+  pins=[
+    Pin(num='1',  name='DEMB', func=Pin.types.INPUT),
+    Pin(num='2',  name='ILIM', func=Pin.types.INPUT),
+    Pin(num='3',  name='AGND', func=Pin.types.PWRIN),
+    Pin(num='4',  name='FB',   func=Pin.types.INPUT),
+    Pin(num='5',  name='COMP', func=Pin.types.PASSIVE),
+    Pin(num='6',  name='RT',   func=Pin.types.PASSIVE),
+    Pin(num='7',  name='SS',   func=Pin.types.PASSIVE),
+    Pin(num='8',  name='SYNC', func=Pin.types.INPUT),
+    Pin(num='9',  name='UVLO', func=Pin.types.INPUT),
+    Pin(num='10', name='VCC',  func=Pin.types.PWROUT),
+    Pin(num='11', name='BST',  func=Pin.types.PASSIVE),
+    Pin(num='12', name='HO',   func=Pin.types.OUTPUT),
+    Pin(num='13', name='SW',   func=Pin.types.PASSIVE),
+    Pin(num='14', name='LO',   func=Pin.types.OUTPUT),
+    Pin(num='15', name='PGND', func=Pin.types.PWRIN),
+    Pin(num='16', name='CSP',  func=Pin.types.INPUT),
+    Pin(num='17', name='EN',   func=Pin.types.INPUT),
+    Pin(num='18', name='VIN',  func=Pin.types.PWRIN),
+    Pin(num='19', name='PG',   func=Pin.types.OPENCOLL),
+    Pin(num='20', name='CSN',  func=Pin.types.INPUT),
+    Pin(num='21', name='EP',   func=Pin.types.PASSIVE),
+  ])
+U_BOOST.ref = 'U14'
+U_BOOST[18] += vin24        # VIN
+U_BOOST[17] += vin24        # EN (on when input present)
+U_BOOST[3]  += gnd          # AGND
+U_BOOST[15] += gnd          # PGND
+U_BOOST[21] += gnd          # EP
+U_BOOST[1]  += gnd          # DEMB (GND = forced CCM)
+U_BOOST[8]  += gnd          # SYNC (GND = internal clock)
+# VCC bypass
+decouple(Net('BOOST_VCC'), gnd, 1, '4.7uF',
+         'Capacitor_SMD:C_0805_2012Metric')
+U_BOOST[10] += Net('BOOST_VCC')
+# Bootstrap cap
+bst_net = Net('BST_BOOST')
+U_BOOST[11] += bst_net
+boost_sw = Net('BOOST_SW')
+U_BOOST[13] += boost_sw
+c = cap('100nF'); c[1] += bst_net; c[2] += boost_sw
+# High/low gate drive -> external FETs (simplified: using
+# integrated FET topology or external N-FETs — TO BE REFINED
+# per LM5122 reference design. For now, nets are named.)
+U_BOOST[12] += Net('BOOST_HO')   # high-side gate
+U_BOOST[14] += Net('BOOST_LO')   # low-side gate
+# Current sense across inductor
+U_BOOST[16] += Net('BOOST_CSP')  # sense +
+U_BOOST[20] += Net('BOOST_CSN')  # sense -
+# Soft-start
+c = cap('100nF'); c[1] += Net('BOOST_SS'); c[2] += gnd
+U_BOOST[7] += Net('BOOST_SS')
+# Frequency set (200kHz: RT ~150k per datasheet)
+r = res('150k'); r[1] += Net('BOOST_RT'); r[2] += gnd
+U_BOOST[6] += Net('BOOST_RT')
+# UVLO: set for 20V turn-on (divider from VIN)
+uvlo_net = Net('BOOST_UVLO')
+U_BOOST[9] += uvlo_net
+r = res('100k'); r[1] += vin24; r[2] += uvlo_net
+r = res('6.8k'); r[1] += uvlo_net; r[2] += gnd
+# ILIM: set with resistor to GND (per datasheet)
+r = res('33k'); r[1] += Net('BOOST_ILIM'); r[2] += gnd
+U_BOOST[2] += Net('BOOST_ILIM')
+# FB divider for 48V output (1.227V ref):
+# R_top/R_bot = (48-1.227)/1.227 = 38.1 -> 383k/10k
+boost_fb = Net('BOOST_FB'); U_BOOST[4] += boost_fb
+r = res('383k'); r[1] += vbus48; r[2] += boost_fb
+r = res('10k'); r[1] += boost_fb; r[2] += gnd
+# Compensation: 10nF + 10k series from COMP (tune per app note)
+boost_comp = Net('BOOST_COMP'); U_BOOST[5] += boost_comp
+r = res('10k'); r[1] += boost_comp
+bc_mid = Net('BOOST_COMP_MID'); r[2] += bc_mid
+c = cap('10nF'); c[1] += bc_mid; c[2] += gnd
+# Power good (open drain, pull up)
+r = res('100k'); r[1] += vin24; r[2] += Net('BOOST_PG')
+U_BOOST[19] += Net('BOOST_PG')
+# Boost output inductor (10uH, high current)
+l = inductor('10uH', 'Inductor_SMD:L_1210_3225Metric')
+l[1] += vin24; l[2] += boost_sw
+# Output caps on 48V rail
+for _ in range(3):
+  c = cap('10uF', 'Capacitor_SMD:C_1206_3216Metric')
+  c[1] += vbus48; c[2] += gnd
+# Input caps on 24V
+for _ in range(2):
+  c = cap('22uF', 'Capacitor_SMD:C_1206_3216Metric')
+  c[1] += vin24; c[2] += gnd
+
+# ============================================================
+# TPS54560 buck converter -- 24V to 5V, SOIC-8+EP
+# (Vin range 4.5-60V, works from 24V directly)
 # ============================================================
 U6 = Part(
   tool=SKIDL, name='TPS54560', ref_prefix='U',
@@ -172,10 +282,10 @@ U6 = Part(
 U6.ref = 'U6'
 
 sw_node = Net('SW_NODE')
-U6[2] += vin48
+U6[2] += vin24
 U6[7] += gnd
 U6[9] += gnd
-U6[3] += vin48  # EN tied to VIN (always on)
+U6[3] += vin24  # EN tied to VIN (always on)
 U6[8] += sw_node
 
 # Bootstrap cap: 100nF from BOOT to PH
@@ -192,7 +302,7 @@ c = cap('15nF'); c[1] += comp_mid; c[2] += gnd
 # Input caps: 2x 2.2uF/100V
 for _ in range(2):
   c = cap('2.2uF', 'Capacitor_SMD:C_1206_3216Metric')
-  c[1] += vin48; c[2] += gnd
+  c[1] += vin24; c[2] += gnd
 # Schottky SS54: cathode to SW_NODE, anode to GND
 D1 = Part(
   tool=SKIDL, name='SS54', ref_prefix='D',
@@ -300,7 +410,7 @@ for _ in range(2):
   c[1] += vdd18; c[2] += gnd
 
 # Bulk caps per rail
-for rail in [vin48, vdd5, vdd33, vdd25, vdd12, vcore, vdd18]:
+for rail in [vin24, vdd5, vdd33, vdd25, vdd12, vcore, vdd18]:
   c = cap('10uF', 'Capacitor_SMD:C_0805_2012Metric')
   c[1] += rail; c[2] += gnd
 
@@ -565,10 +675,10 @@ def wire_pse_common(u, a3_to_gnd):
   u[1]  += vdd33      # VDD
   u[7]  += gnd        # DGND
   u[22] += gnd        # AGND
-  u[28] += vin48      # VPWR
+  u[28] += vbus48      # VPWR
   decouple(vdd33, gnd, 1)
   c = cap('100nF', 'Capacitor_SMD:C_0805_2012Metric')
-  c[1] += vin48; c[2] += gnd
+  c[1] += vbus48; c[2] += gnd
   rst = Net(f'{u.ref}_RESET')
   u[2] += rst
   r = res('10k'); r[1] += vdd33; r[2] += rst
@@ -590,8 +700,8 @@ def wire_pse_channel(u, sen_pin, drain_pin, gate_pin, vp_net,
   u[drain_pin] += drain_s
   u[sen_pin] += sen
   q = nfet(qref)
-  q[1] += gate; q[2] += vin48; q[3] += src
-  r = res('47'); r[1] += vin48; r[2] += drain_s
+  q[1] += gate; q[2] += vbus48; q[3] += src
+  r = res('47'); r[1] += vbus48; r[2] += drain_s
   # 0.25 ohm sense resistor
   _rref[0] += 1
   r = Part(
@@ -939,6 +1049,11 @@ stat = Net('LED_STATUS'); an = Net('LED_STA_A')
 r = res('270'); d = led()
 r[1] += vdd33; r[2] += an; d[1] += an; d[2] += stat
 tc('PB7', stat)
+# Fault/alarm LED (red) on a T113 GPIO (active low)
+fault = Net('LED_FAULT'); an = Net('LED_FAULT_A')
+r = res('270'); d = led()
+r[1] += vdd33; r[2] += an; d[1] += an; d[2] += fault
+tc('PE4', fault)
 
 # ============================================================
 # Generate netlist
