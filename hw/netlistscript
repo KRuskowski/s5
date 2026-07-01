@@ -139,15 +139,16 @@ gnd   = Net('GND')
 # ============================================================
 # Power input -- 3-pin Phoenix Contact pluggable terminal block
 # Pin 1=+24V, pin 2=GND(0V), pin 3=PE(earth)
-# MC 1,5/3-G-3.5 (3.5mm pitch, 3-pin, horizontal)
-# Mates with: Phoenix Contact MC 1.5/3-ST-3.5 plug
+# MSTB 2,5/3-GF-5,08 (5.08mm pitch, 3-pin, horizontal,
+# threaded flange for locking). Mates with MSTB 2,5/3-ST-5,08.
+# Place at bottom board edge, rotate so wires exit downward.
 # ============================================================
 J1 = Part(
   tool=SKIDL, name='Conn_01x03', ref_prefix='J',
   dest=NETLIST,
-  footprint='Connector_Phoenix_MC:'
-            'PhoenixContact_MC_1,5_3-G-3.5_1x03'
-            '_P3.50mm_Horizontal',
+  footprint='Connector_Phoenix_MSTB:'
+            'PhoenixContact_MSTB_2,5_3-GF-5,08_1x03'
+            '_P5.08mm_Horizontal_ThreadedFlange',
   pins=[
     Pin(num='1', name='24V',  func=Pin.types.PASSIVE),
     Pin(num='2', name='GND',  func=Pin.types.PASSIVE),
@@ -933,6 +934,44 @@ J7[1] += uart_tx; J7[2] += uart_rx; J7[3] += gnd
 # --- T113 USB0 OTG -> USB-C (section below) ---
 usb_dp = Net('USB_DP'); usb_dm = Net('USB_DM')
 tc('USB0-DP', usb_dp); tc('USB0-DM', usb_dm)
+
+# --- T113 SDC0 (PF bank) -> micro SD card slot ---
+# Standard micro SD pinout (SD mode, 4-bit):
+#   1=DAT2, 2=DAT3/CD, 3=CMD, 4=VDD, 5=CLK,
+#   6=VSS, 7=DAT0, 8=DAT1, 9=CD(detect), 10/11=shield
+sd_clk = Net('SD_CLK')
+sd_cmd = Net('SD_CMD')
+sd_d0  = Net('SD_D0')
+sd_d1  = Net('SD_D1')
+sd_d2  = Net('SD_D2')
+sd_d3  = Net('SD_D3')
+tc('PF0', sd_d1)    # SDC0_D1
+tc('PF1', sd_d0)    # SDC0_D0
+tc('PF2', sd_clk)   # SDC0_CLK
+tc('PF3', sd_cmd)   # SDC0_CMD
+tc('PF4', sd_d3)    # SDC0_D3
+tc('PF5', sd_d2)    # SDC0_D2
+
+J_SD = Part(
+  tool=SKIDL, name='microSD', ref_prefix='J', dest=NETLIST,
+  footprint='Connector_Card:'
+            'microSD_HC_Molex_104031-0811',
+  pins=[Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
+        for i in range(1, 12)])
+J_SD.ref = 'J8'
+J_SD[1]  += sd_d2     # DAT2
+J_SD[2]  += sd_d3     # DAT3/CD
+J_SD[3]  += sd_cmd    # CMD
+J_SD[4]  += vdd33     # VDD
+J_SD[5]  += sd_clk    # CLK
+J_SD[6]  += gnd       # VSS
+J_SD[7]  += sd_d0     # DAT0
+J_SD[8]  += sd_d1     # DAT1
+J_SD[9]  += Net('SD_CD')   # card detect (optional GPIO)
+J_SD[10] += gnd       # shield
+J_SD[11] += gnd       # shield
+# ESD protection: 100nF on VDD
+decouple(vdd33, gnd, 1)
 
 # --- T113 watchdog kick GPIO (PB6) ---
 wdi = Net('WDI'); tc('PB6', wdi)
