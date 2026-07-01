@@ -133,20 +133,22 @@ vdd18 = Net('VDD_1V8')      # T113-S3 VDD18-DRAM (LDO)
 gnd   = Net('GND')
 
 # ============================================================
-# Power input -- 2-pin screw terminal (48V DC)
+# Power input -- 5.5/2.5mm barrel jack (48V DC)
+# Pin 1=tip(+48V), pin 2=sleeve(GND), pin 3=switch(NC)
 # ============================================================
 J1 = Part(
-  tool=SKIDL, name='Conn_01x02', ref_prefix='J',
+  tool=SKIDL, name='BarrelJack', ref_prefix='J',
   dest=NETLIST,
-  footprint='TerminalBlock_Phoenix:'
-            'TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal',
+  footprint='Connector_BarrelJack:BarrelJack_Horizontal',
   pins=[
-    Pin(num='1', name='VIN', func=Pin.types.PASSIVE),
-    Pin(num='2', name='GND', func=Pin.types.PASSIVE),
+    Pin(num='1', name='TIP',    func=Pin.types.PASSIVE),
+    Pin(num='2', name='SLEEVE', func=Pin.types.PASSIVE),
+    Pin(num='3', name='SW',     func=Pin.types.PASSIVE),
   ])
 J1.ref = 'J1'
 J1[1] += vin48
 J1[2] += gnd
+J1[3] += gnd   # switch contact tied to GND
 
 # ============================================================
 # TPS54560 buck converter -- 48V to 5V, SOIC-8+EP
@@ -826,13 +828,12 @@ tc('USB0-DP', usb_dp); tc('USB0-DM', usb_dm)
 wdi = Net('WDI'); tc('PB6', wdi)
 
 # ============================================================
-# W25Q128 SPI NOR boot flash -- SOIC-8, on a dedicated H3 SPI
-# (H3 boots from SPI flash on SPI0; KSZ uses a separate CS via
-#  GPIO so flash + KSZ share the SPI0 bus cleanly).
-# Here flash shares SPI0 bus; flash CS on PC23-like GPIO.
+# W25N02 SPI NAND boot flash (256MB) -- SOIC-8
+# Shared SPI0 bus; flash CS on T113 PC3 (SPI0-CS0),
+# KSZ CS on PB4 (GPIO).
 # ============================================================
 U8 = Part(
-  tool=SKIDL, name='W25Q128JVSIQ', ref_prefix='U', dest=NETLIST,
+  tool=SKIDL, name='W25N02JWZEIF', ref_prefix='U', dest=NETLIST,
   footprint='Package_SO:SOIC-8_3.9x4.9mm_P1.27mm',
   pins=[
     Pin(num='1', name='CS',   func=Pin.types.INPUT),
@@ -880,16 +881,8 @@ U10[5] += wdi   # wdi wired to T113 PB6 in the T113 section
 decouple(vdd33, gnd, 1)
 
 # ============================================================
-# BOOT and RESET buttons
+# RESET button
 # ============================================================
-SW1 = Part(
-  tool=SKIDL, name='SW_Push', ref_prefix='SW', dest=NETLIST,
-  footprint='Button_Switch_SMD:SW_Push_1P1T_NO_CK_KMR2',
-  pins=[Pin(num='1', name='A', func=Pin.types.PASSIVE),
-        Pin(num='2', name='B', func=Pin.types.PASSIVE)])
-SW1.ref = 'SW1'
-SW1[1] += spi_clk   # hold SPI clk for FEL/boot select
-SW1[2] += gnd
 SW2 = Part(
   tool=SKIDL, name='SW_Push', ref_prefix='SW', dest=NETLIST,
   footprint='Button_Switch_SMD:SW_Push_1P1T_NO_CK_KMR2',
