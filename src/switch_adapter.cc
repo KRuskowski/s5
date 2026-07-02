@@ -90,6 +90,10 @@ class SwitchAdapter : public ProductAdapter {
  public:
   SwitchAdapter() {
     ports_ = dsa::DiscoverPorts();
+    // schema_ MUST never be null — GetSchema() returns *schema_,
+    // and completion for `set <tab>` dereferences it. A null here
+    // is a segfault, not a catchable exception.
+    schema_ = std::make_shared<Schema>();
   }
 
   auto Metadata() const -> ProductMetadata override {
