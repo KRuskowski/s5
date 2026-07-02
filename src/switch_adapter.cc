@@ -130,12 +130,8 @@ class SwitchAdapter : public ProductAdapter {
             .wire_command = "show version",
             .help = "Show switch information",
         },
-        CommandSpec{
-            .path = "shell",
-            .role = cli::RoleGate::AdminOnly,
-            .wire_command = "shell",
-            .help = "Drop to bash (exit returns here)",
-        },
+        // `shell` is provided by the framework globals
+        // (audit-logged); no adapter entry needed.
         // System management.
         CommandSpec{
             .path = "show system",
@@ -396,10 +392,6 @@ class SwitchAdapter : public ProductAdapter {
       for (const auto &p : ports_) {
         renderer.Out() << std::format("    {}\n", p);
       }
-    } else if (wire == "shell") {
-      renderer.Out() << "  dropping to bash (exit to return)\n";
-      renderer.Out().flush();
-      std::system("/bin/bash");
     } else if (wire == "show system") {
       auto hostname = sys::GetHostname();
       auto uptime = sys::GetUptime();

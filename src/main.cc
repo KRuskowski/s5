@@ -12,6 +12,7 @@
 #include "einheit/cli/adapter.h"
 #include "einheit/cli/auth.h"
 #include "einheit/cli/command_tree.h"
+#include "einheit/cli/globals.h"
 #include "einheit/cli/render/terminal_caps.h"
 #include "einheit/cli/shell.h"
 #include "einheit/cli/transport/transport.h"
@@ -87,6 +88,14 @@ int main(int argc, char *argv[]) {
   auto adapter = einheit::s5::MakeSwitchAdapter();
 
   CommandTree tree;
+  // Framework globals: help, exit, quit, history, alias, watch,
+  // shell, etc. Register these first so the adapter's commands
+  // layer on top.
+  if (auto r = RegisterGlobals(tree); !r) {
+    std::cerr << std::format("register globals: {}\n",
+                             r.error().message);
+    return 1;
+  }
   for (const auto &spec : adapter->Commands()) {
     Register(tree, spec);
   }
