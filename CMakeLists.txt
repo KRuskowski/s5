@@ -33,3 +33,17 @@ target_link_libraries(einheit_s5 PRIVATE
 if(CMAKE_CROSSCOMPILING)
   target_link_options(einheit_s5 PRIVATE -static)
 endif()
+
+# ------------------------------------------------------------------
+# einheit-launch — tiny setuid-root CLI launcher (plain C).
+# Installed on-device as root:root mode 4755. Authenticates the
+# caller, sets EINHEIT_USER/ROLE, execs the CLI as root (admin) or
+# unprivileged (operator).
+# ------------------------------------------------------------------
+add_executable(einheit_launch src/launch.c)
+set_target_properties(einheit_launch PROPERTIES
+  OUTPUT_NAME einheit-launch
+  C_STANDARD 11)
+if(CMAKE_CROSSCOMPILING)
+  target_link_options(einheit_launch PRIVATE -static)
+endif()
