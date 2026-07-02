@@ -7,9 +7,12 @@
 #include "einheit/s5/sys.h"
 #include "einheit/s5/util.h"
 
+#include <climits>
+#include <cerrno>
 #include <cstdlib>
 #include <format>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -48,6 +51,28 @@ auto ExtractArgs(const Response &r) -> std::vector<std::string> {
 auto Arg(const Response &r, std::size_t idx) -> std::string {
   auto args = ExtractArgs(r);
   return idx < args.size() ? args[idx] : "";
+}
+
+/// Parse an integer argument without ever throwing. Returns
+/// std::nullopt on empty/non-numeric input so callers render a
+/// clean error instead of aborting on std::stoi.
+auto ParseInt(const std::string &s) -> std::optional<int> {
+  if (s.empty()) return std::nullopt;
+  errno = 0;
+  char *end = nullptr;
+  const long v = std::strtol(s.c_str(), &end, 10);
+  if (end == s.c_str() || *end != '\0' || errno != 0 ||
+      v < INT_MIN || v > INT_MAX) {
+    return std::nullopt;
+  }
+  return static_cast<int>(v);
+}
+
+/// Parse a port argument, validating the 1-5 range.
+auto ParsePort(const std::string &s) -> std::optional<int> {
+  auto v = ParseInt(s);
+  if (!v || *v < 1 || *v > 5) return std::nullopt;
+  return v;
 }
 
 constexpr const char *kSchemaYaml = R"(
@@ -461,7 +486,16 @@ class SwitchAdapter : public ProductAdapter {
       RenderFormatted(t, renderer);
     } else if (wire == "show log") {
       auto arg = Arg(response, 0);
-      int lines = arg.empty() ? 20 : std::stoi(arg);
+      int lines = 20;
+      if (!arg.empty()) {
+        auto n = ParseInt(arg);
+        if (!n || *n < 1) {
+          renderer.Out() << std::format(
+              "  invalid line count: '{}'\n", arg);
+          return;
+        }
+        lines = *n;
+      }
       auto log = sys::GetSyslog(lines);
       renderer.Out() << log;
     } else if (wire == "show users") {
@@ -577,27 +611,39 @@ class SwitchAdapter : public ProductAdapter {
       renderer.Out() << std::format(
           "  total: {:.1f}W\n", poe::GetTotalPower());
     } else if (wire == "set poe enable") {
-      int port = std::stoi(Arg(response, 0));
-      if (poe::SetPortEnabled(port, true)) {
+      auto port = ParsePort(Arg(response, 0));
+      if (!port) {
+        renderer.Out() << "  invalid port (expected 1-5)\n";
+        return;
+      }
+      if (poe::SetPortEnabled(*port, true)) {
         renderer.Out() << std::format(
-            "  PoE enabled on port {}\n", port);
+            "  PoE enabled on port {}\n", *port);
       } else {
         renderer.Out() << "  failed to enable PoE\n";
       }
     } else if (wire == "set poe disable") {
-      int port = std::stoi(Arg(response, 0));
-      if (poe::SetPortEnabled(port, false)) {
+      auto port = ParsePort(Arg(response, 0));
+      if (!port) {
+        renderer.Out() << "  invalid port (expected 1-5)\n";
+        return;
+      }
+      if (poe::SetPortEnabled(*port, false)) {
         renderer.Out() << std::format(
-            "  PoE disabled on port {}\n", port);
+            "  PoE disabled on port {}\n", *port);
       } else {
         renderer.Out() << "  failed to disable PoE\n";
       }
     } else if (wire == "set poe reset") {
-      int port = std::stoi(Arg(response, 0));
+      auto port = ParsePort(Arg(response, 0));
+      if (!port) {
+        renderer.Out() << "  invalid port (expected 1-5)\n";
+        return;
+      }
       renderer.Out() << std::format(
-          "  power-cycling port {}...\n", port);
+          "  power-cycling port {}...\n", *port);
       renderer.Out().flush();
-      if (poe::ResetPort(port)) {
+      if (poe::ResetPort(*port)) {
         renderer.Out() << "  done\n";
       } else {
         renderer.Out() << "  failed\n";

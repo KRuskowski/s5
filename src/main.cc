@@ -123,10 +123,21 @@ int main(int argc, char *argv[]) {
   sh.caller = caller;
   sh.target_name = "local";
 
-  auto result = shell::RunShell(sh);
-  if (!result) {
-    std::cerr << std::format("shell error: {}\n",
-                             result.error().message);
+  // Last-resort net: nothing that escapes the shell may reach
+  // std::terminate (a silent abort). Turn it into a clean message
+  // and a non-zero exit so failures are always visible.
+  try {
+    auto result = shell::RunShell(sh);
+    if (!result) {
+      std::cerr << std::format("shell error: {}\n",
+                               result.error().message);
+      return 1;
+    }
+  } catch (const std::exception &e) {
+    std::cerr << std::format("fatal: {}\n", e.what());
+    return 1;
+  } catch (...) {
+    std::cerr << "fatal: unknown error\n";
     return 1;
   }
   return 0;
