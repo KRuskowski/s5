@@ -15,7 +15,7 @@ over RGMII from the PG bank (frees all 5 copper PHYs for users).
 
 PoE PSE: 2x TPS23861 (4 channels each) covers all 5 ports.
 24V DC in (Phoenix Contact pluggable terminal, 3-pin: +24V/GND/PE)
--> LM5122 boost (24V to 48V for PoE) + TPS54560 buck (24V to 5V)
+-> LM5122 boost (24V to 54V for PoE) + TPS54560 buck (24V to 5V)
 -> LDO chain (3.3 / 2.5 / 1.2V for KSZ) + 0.9V buck (T113
 VDD-CORE) + 1.8V LDO (VDD18-DRAM).
 
@@ -126,7 +126,7 @@ def decouple(rail, gnd, n, value='100nF',
 # Power nets
 # ============================================================
 vin24 = Net('VIN_24V')
-vbus48 = Net('VBUS_48V')     # 48V PoE rail (from boost)
+vbus54 = Net('VBUS_54V')     # 54V PoE rail (from boost)
 vdd5  = Net('VDD_5V')
 earth = Net('PE')            # protective earth
 vdd33 = Net('VDD_3V3')
@@ -224,7 +224,7 @@ c = cap('100uF', 'Capacitor_SMD:C_1206_3216Metric')
 c[1] += vin24; c[2] += gnd
 
 # ============================================================
-# LM5122 boost converter -- 24V to 48V for PoE rail
+# LM5122 boost converter -- 24V to 54V for PoE rail
 # WQFN-20 (4x4mm). Synchronous boost controller.
 # Key pins: VIN=18, EN=17, HO=12, LO=14, SW=13,
 #   BST=11, SS=7, COMP=5, FB=4, PGND=15, AGND=3, VCC=10
@@ -302,7 +302,7 @@ U_BOOST[2] += boost_ilim
 # FB divider, 54V out, 1.227V ref (802.3at/bt need PSE >=50V; 48V was af-only):
 # R_top/R_bot = (54-1.227)/1.227 = 43.0 -> 430k/10k
 boost_fb = Net('BOOST_FB'); U_BOOST[4] += boost_fb
-r = res('430k'); r[1] += vbus48; r[2] += boost_fb
+r = res('430k'); r[1] += vbus54; r[2] += boost_fb
 r = res('10k'); r[1] += boost_fb; r[2] += gnd
 # Compensation: 10nF + 10k series from COMP (tune per app note)
 boost_comp = Net('BOOST_COMP'); U_BOOST[5] += boost_comp
@@ -316,10 +316,10 @@ U_BOOST[19] += boost_pg
 # Boost output inductor (10uH, high current)
 l = inductor('10uH', 'Inductor_SMD:L_1210_3225Metric')
 l[1] += vin24; l[2] += boost_sw
-# Output caps on 48V rail
+# Output caps on 54V rail
 for _ in range(3):
   c = cap('10uF', 'Capacitor_SMD:C_1206_3216Metric')
-  c[1] += vbus48; c[2] += gnd
+  c[1] += vbus54; c[2] += gnd
 # Input caps on 24V
 for _ in range(2):
   c = cap('22uF', 'Capacitor_SMD:C_1206_3216Metric')
@@ -654,7 +654,7 @@ for pn in range(1, 6):
   c = cap('100nF'); c[1] += ct2; c[2] += gnd
 
   # Line-side center taps: PoE Mode A
-  # VC1+VC2 (pins 11,12) -> 48V from PSE
+  # VC1+VC2 (pins 11,12) -> 54V from PSE
   # VC3+VC4 (pins 13,14) -> return (GND)
   j[11] += poe_vp[pn]; j[12] += poe_vp[pn]
   j[13] += gnd;        j[14] += gnd
@@ -753,10 +753,10 @@ def wire_pse_common(u, a3_to_gnd):
   u[1]  += vpse33     # VDD (always-on PoE rail)
   u[7]  += gnd        # DGND
   u[22] += gnd        # AGND
-  u[28] += vbus48      # VPWR
+  u[28] += vbus54      # VPWR
   decouple(vpse33, gnd, 1)
   c = cap('100nF', 'Capacitor_SMD:C_0805_2012Metric')
-  c[1] += vbus48; c[2] += gnd
+  c[1] += vbus54; c[2] += gnd
   u[2] += pse_reset   # shared active-low reset; STM asserts it to shed PoE
   u[3] += i2c_scl; u[4] += i2c_sda; u[5] += i2c_sda
   u[6] += Net(f'{u.ref}_INT_N')
@@ -776,8 +776,8 @@ def wire_pse_channel(u, sen_pin, drain_pin, gate_pin, vp_net,
   u[drain_pin] += drain_s
   u[sen_pin] += sen
   q = nfet(qref)
-  q[1] += gate; q[2] += vbus48; q[3] += src
-  r = res('47'); r[1] += vbus48; r[2] += drain_s
+  q[1] += gate; q[2] += vbus54; q[3] += src
+  r = res('47'); r[1] += vbus54; r[2] += drain_s
   # 0.25 ohm sense resistor
   _rref[0] += 1
   r = Part(
