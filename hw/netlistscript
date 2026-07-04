@@ -299,10 +299,10 @@ r = res('6.8k'); r[1] += uvlo_net; r[2] += gnd
 boost_ilim = Net('BOOST_ILIM')
 r = res('33k'); r[1] += boost_ilim; r[2] += gnd
 U_BOOST[2] += boost_ilim
-# FB divider for 48V output (1.227V ref):
-# R_top/R_bot = (48-1.227)/1.227 = 38.1 -> 383k/10k
+# FB divider, 54V out, 1.227V ref (802.3at/bt need PSE >=50V; 48V was af-only):
+# R_top/R_bot = (54-1.227)/1.227 = 43.0 -> 430k/10k
 boost_fb = Net('BOOST_FB'); U_BOOST[4] += boost_fb
-r = res('383k'); r[1] += vbus48; r[2] += boost_fb
+r = res('430k'); r[1] += vbus48; r[2] += boost_fb
 r = res('10k'); r[1] += boost_fb; r[2] += gnd
 # Compensation: 10nF + 10k series from COMP (tune per app note)
 boost_comp = Net('BOOST_COMP'); U_BOOST[5] += boost_comp
