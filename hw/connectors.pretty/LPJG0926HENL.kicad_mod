@@ -45,4 +45,9 @@
   (fp_line (start 9.4 -10.7) (end -9.4 -10.7) (layer F.CrtYd) (width 0.05))
   (fp_circle (center -5.715 -11.0) (end -5.615 -11.0) (layer F.SilkS) (width 0.2))
   (fp_circle (center -5.715 -11.0) (end -5.615 -11.0) (layer F.Fab) (width 0.2))
+  (model "${KIPRJMOD}/LPJG0926HENL.step"
+    (offset (xyz 0 0 0))
+    (scale (xyz 1 1 1))
+    (rotate (xyz 0 0 0))
+  )
 )

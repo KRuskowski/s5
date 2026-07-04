@@ -2140,4 +2140,9 @@
 		(uuid "f09965c0-5928-4838-a43d-dd53dbb77280")
 	)
 	(embedded_fonts no)
+  (model "${KIPRJMOD}/KSZ9477STXI.step"
+    (offset (xyz 0 0 0))
+    (scale (xyz 1 1 1))
+    (rotate (xyz 0 0 0))
+  )
 )

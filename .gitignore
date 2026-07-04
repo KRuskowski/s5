@@ -5,3 +5,9 @@ hw/*.erc
 hw/fp-info-cache
 hw/.venv/
 ~*.lck
+hw/blender/
+hw/.step
+hw/.history/
+hw/_autosave-*
+hw/~*.lck
+build-arm/
