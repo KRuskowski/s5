@@ -14,10 +14,13 @@ SPI0; debug UART0; USB; SPI boot flash. EMAC drives KSZ port 6
 over RGMII from the PG bank (frees all 5 copper PHYs for users).
 
 PoE PSE: 2x TPS23861 (4 channels each) covers all 5 ports.
-24V DC in (Phoenix Contact pluggable terminal, 3-pin: +24V/GND/PE)
--> LM5122 boost (24V to 54V for PoE) + TPS54560 buck (24V to 5V)
--> LDO chain (3.3 / 2.5 / 1.2V for KSZ) + 0.9V buck (T113
-VDD-CORE) + 1.8V LDO (VDD18-DRAM).
+Power comes from the SEPARATE s5-power board via a Molex Micro-Fit
+2x6 interconnect (J9): VBUS_54V (PoE), VIN_24V (protected, for the
+always-on standby LDOs + fault relay), VDD_5V, VDD_3V3, MAIN_EN.
+All switching (input protection, LM5122 54V boost, TPS54560 5V buck,
+AMS1117 3V3 LDO) lives on the power board; this board keeps only the
+point-of-load rails: 2.5 / 1.2V (KSZ) + 0.9V buck (T113 VDD-CORE) +
+1.8V LDO (VDD18-DRAM). MAIN_EN is driven back to gate the buck.
 
 4-layer stackup intent (no external DDR3 routing).
 
@@ -136,45 +139,35 @@ vcore = Net('VDD_CORE')     # T113-S3 VDD-CORE 0.9V (buck)
 vdd18 = Net('VDD_1V8')      # T113-S3 VDD18-DRAM (LDO)
 gnd   = Net('GND')
 v3v3_sb = Net('VDD_3V3_SB')  # always-on standby (supervisor + dumb wd)
-main_en = Net('MAIN_EN')     # TPS54560 EN -- STM/dumb-wd power-cycle line
+main_en = Net('MAIN_EN')     # -> power-board buck EN (via J9); STM/dumb-wd cut
 vpse33 = Net('VDD_3V3_PSE')  # PoE housekeeping 3.3V -- always on (rides cycle)
 pse_reset = Net('PSE_RESET_N') # STM pulls low = reset PSEs = shed PoE (thermal)
 
 # ============================================================
-# Power input -- 3-pin Phoenix Contact pluggable terminal block
-# Pin 1=+24V, pin 2=GND(0V), pin 3=PE(earth)
-# MSTB 2,5/3-GF-5,08 (5.08mm pitch, 3-pin, horizontal,
-# threaded flange for locking). Mates with MSTB 2,5/3-ST-5,08.
-# Place at bottom board edge, rotate so wires exit downward.
+# Board-to-board POWER INTERCONNECT -- Molex Micro-Fit 3.0 2x6
+# All switching (24V input protection, LM5122 54V boost, TPS54560
+# 5V buck, 3V3 LDO) lives on the s5-power board now. The core board
+# receives finished rails here and drives MAIN_EN back to gate the
+# buck. Mates 1:1 via a straight cable to power-board J2, so the
+# pinout MUST match power-board J2 exactly:
+#   1=VBUS_54V 2=GND   3=VBUS_54V 4=GND   5=VIN_24V 6=GND
+#   7=VDD_5V   8=GND   9=VDD_3V3  10=GND  11=MAIN_EN 12=GND
+# VBUS on 2 parallel pins (Micro-Fit ~8.5A/circuit, 7A PoE).
+# VIN_24V = protected 24V for the always-on standby LDOs (U18/U20)
+# + fault relay K1. GND on 6 pins for return + interleaving.
 # ============================================================
-J1 = Part(
-  tool=SKIDL, name='MSTB2,5/3-GF-5,08_1776511', ref_prefix='J',
-  dest=NETLIST,
-  footprint='Connector_Phoenix_MSTB:'
-            'PhoenixContact_MSTB_2,5_3-GF-5,08_1x03'
-            '_P5.08mm_Horizontal_ThreadedFlange',
-  pins=[
-    Pin(num='1', name='24V',  func=Pin.types.PASSIVE),
-    Pin(num='2', name='GND',  func=Pin.types.PASSIVE),
-    Pin(num='3', name='PE',   func=Pin.types.PASSIVE),
-  ])
-J1.ref = 'J1'
-# ============================================================
-# INPUT PROTECTION FRONT-END (24V industrial)
-#   J1(+24V) -> fuse -> reverse-polarity P-FET -> TVS/MOV
-#              -> inrush NTC -> ferrite pi-filter -> VIN_24V
-# Essentials populated for the proto; MOV + ferrite cover the
-# IEC 61000-4-5 surge / -4-4 EFT hardening for the cert build.
-# Reverse-polarity FET + fuse + TVS never DNP -- bench insurance.
-# ============================================================
-vin_raw   = Net('VIN_RAW')
-vin_fused = Net('VIN_FUSED')
-vin_prot  = Net('VIN_PROT')       # after reverse-polarity FET
-rp_gate   = Net('RP_GATE')
-
-J1[1] += vin_raw   # +24V raw (pre-protection); protected -> VIN_24V below
-J1[2] += gnd
-J1[3] += earth    # PE routed to chassis/shield pad
+J9 = Part(tool=SKIDL, name='Conn_02x06', ref_prefix='J', dest=NETLIST,
+  footprint='Connector_Molex:'
+            'Molex_Micro-Fit_3.0_43045-1200_2x06_P3.00mm_Horizontal',
+  pins=[Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
+        for i in range(1, 13)])
+J9.ref = 'J9'
+J9[1] += vbus54; J9[2] += gnd;  J9[3] += vbus54;   J9[4]  += gnd
+J9[5] += vin24;  J9[6] += gnd;  J9[7] += vdd5;     J9[8]  += gnd
+J9[9] += vdd33;  J9[10] += gnd; J9[11] += main_en; J9[12] += gnd
+# VBUS-54V entry bulk (>=100V rated -- MUST NOT drop to a 0805/50V part)
+c = cap('10uF', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vbus54; c[2] += gnd
+# (vin24/vdd5/vdd33 entry bulk is added by the per-rail loop below.)
 
 def two_pin(name, ref, fp):
   """Generic 2-terminal part (fuse / TVS / MOV / NTC / zener / switch)."""
@@ -186,214 +179,10 @@ def two_pin(name, ref, fp):
   p.ref = ref
   return p
 
-# F1: 2A time-lag input fuse
-F1 = two_pin('Fuse_2A_TL', 'F1', 'Fuse:Fuse_1206_3216Metric')
-F1[1] += vin_raw; F1[2] += vin_fused
-
-# Q50: P-channel MOSFET, high-side reverse-polarity (ideal-diode)
-Q50 = Part(tool=SKIDL, name='BSP315P', ref_prefix='Q', dest=NETLIST,
-           footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
-           pins=[Pin(num='1', name='G', func=Pin.types.INPUT),
-                 Pin(num='2', name='D', func=Pin.types.PASSIVE),
-                 Pin(num='3', name='S', func=Pin.types.PASSIVE)])
-Q50.ref = 'Q50'
-Q50[3] += vin_fused    # source = input
-Q50[2] += vin_prot     # drain  = load
-Q50[1] += rp_gate
-r = res('100k'); r[1] += rp_gate; r[2] += gnd            # gate pull-down
-D51 = two_pin('BZX84C12', 'D51', 'Package_TO_SOT_SMD:SOT-23')
-D51[1] += vin_fused; D51[2] += rp_gate                   # Vgs clamp (12V)
-
-# TVS clamp + MOV (surge energy, cert build)
-D50 = two_pin('SMBJ30A', 'D50', 'Diode_SMD:D_SMB')
-D50[1] += vin_prot; D50[2] += gnd
-# RV1 MOV -- DNP by default; populate only if a surge cert (IEC 61000-4-5)
-# requires it. The TVS (D50) handles normal 24V transients.
-RV1 = two_pin('MOV_S14K30_DNP', 'RV1', 'Varistor:RV_Disc_D9mm_W3.9mm_P5mm')
-RV1[1] += vin_prot; RV1[2] += gnd
-
-# Ferrite bead -> VIN_24V. (Inrush NTC dropped -- the TPS54560/LM5122
-# soft-start and 24V inrush is modest.)
-FB1 = two_pin('BLM31PG601SN1', 'FB1', 'Inductor_SMD:L_1206_3216Metric')
-FB1[1] += vin_prot; FB1[2] += vin24
-for _n in (vin_prot, vin24):
-  c = cap('10uF', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += _n; c[2] += gnd
-
-# Input protection: 100uF bulk + TVS on 24V input
-c = cap('100uF', 'Capacitor_SMD:C_1206_3216Metric')
-c[1] += vin24; c[2] += gnd
-
-# ============================================================
-# LM5122 boost converter -- 24V to 54V for PoE rail
-# WQFN-20 (4x4mm). Synchronous boost controller.
-# Key pins: VIN=18, EN=17, HO=12, LO=14, SW=13,
-#   BST=11, SS=7, COMP=5, FB=4, PGND=15, AGND=3, VCC=10
-# ============================================================
-U_BOOST = Part(
-  tool=SKIDL, name='LM5122', ref_prefix='U', dest=NETLIST,
-  footprint='Package_DFN_QFN:QFN-20-1EP_4x4mm_P0.5mm_EP2.7x2.7mm',
-  pins=[
-    Pin(num='1',  name='DEMB', func=Pin.types.INPUT),
-    Pin(num='2',  name='ILIM', func=Pin.types.INPUT),
-    Pin(num='3',  name='AGND', func=Pin.types.PWRIN),
-    Pin(num='4',  name='FB',   func=Pin.types.INPUT),
-    Pin(num='5',  name='COMP', func=Pin.types.PASSIVE),
-    Pin(num='6',  name='RT',   func=Pin.types.PASSIVE),
-    Pin(num='7',  name='SS',   func=Pin.types.PASSIVE),
-    Pin(num='8',  name='SYNC', func=Pin.types.INPUT),
-    Pin(num='9',  name='UVLO', func=Pin.types.INPUT),
-    Pin(num='10', name='VCC',  func=Pin.types.PWROUT),
-    Pin(num='11', name='BST',  func=Pin.types.PASSIVE),
-    Pin(num='12', name='HO',   func=Pin.types.OUTPUT),
-    Pin(num='13', name='SW',   func=Pin.types.PASSIVE),
-    Pin(num='14', name='LO',   func=Pin.types.OUTPUT),
-    Pin(num='15', name='PGND', func=Pin.types.PWRIN),
-    Pin(num='16', name='CSP',  func=Pin.types.INPUT),
-    Pin(num='17', name='EN',   func=Pin.types.INPUT),
-    Pin(num='18', name='VIN',  func=Pin.types.PWRIN),
-    Pin(num='19', name='PG',   func=Pin.types.OPENCOLL),
-    Pin(num='20', name='CSN',  func=Pin.types.INPUT),
-    Pin(num='21', name='EP',   func=Pin.types.PASSIVE),
-  ])
-U_BOOST.ref = 'U14'
-U_BOOST[18] += vin24        # VIN
-U_BOOST[17] += vin24        # EN (on when input present)
-U_BOOST[3]  += gnd          # AGND
-U_BOOST[15] += gnd          # PGND
-U_BOOST[21] += gnd          # EP
-U_BOOST[1]  += gnd          # DEMB (GND = forced CCM)
-U_BOOST[8]  += gnd          # SYNC (GND = internal clock)
-# VCC bypass
-boost_vcc = Net('BOOST_VCC')
-decouple(boost_vcc, gnd, 1, '4.7uF',
-         'Capacitor_SMD:C_0805_2012Metric')
-U_BOOST[10] += boost_vcc
-# Bootstrap cap
-bst_net = Net('BST_BOOST')
-U_BOOST[11] += bst_net
-boost_sw = Net('BOOST_SW')
-U_BOOST[13] += boost_sw
-c = cap('100nF'); c[1] += bst_net; c[2] += boost_sw
-# High/low gate drive -> external FETs (simplified: using
-# integrated FET topology or external N-FETs — TO BE REFINED
-# per LM5122 reference design. For now, nets are named.)
-U_BOOST[12] += Net('BOOST_HO')   # high-side gate
-U_BOOST[14] += Net('BOOST_LO')   # low-side gate
-# Current sense across inductor
-U_BOOST[16] += Net('BOOST_CSP')  # sense +
-U_BOOST[20] += Net('BOOST_CSN')  # sense -
-# Soft-start
-boost_ss = Net('BOOST_SS')
-c = cap('100nF'); c[1] += boost_ss; c[2] += gnd
-U_BOOST[7] += boost_ss
-# Frequency set (200kHz: RT ~150k per datasheet)
-boost_rt = Net('BOOST_RT')
-r = res('150k'); r[1] += boost_rt; r[2] += gnd
-U_BOOST[6] += boost_rt
-# UVLO: set for 20V turn-on (divider from VIN)
-uvlo_net = Net('BOOST_UVLO')
-U_BOOST[9] += uvlo_net
-r = res('100k'); r[1] += vin24; r[2] += uvlo_net
-r = res('6.8k'); r[1] += uvlo_net; r[2] += gnd
-# ILIM: set with resistor to GND (per datasheet)
-boost_ilim = Net('BOOST_ILIM')
-r = res('33k'); r[1] += boost_ilim; r[2] += gnd
-U_BOOST[2] += boost_ilim
-# FB divider, 54V out, 1.227V ref (802.3at/bt need PSE >=50V; 48V was af-only):
-# R_top/R_bot = (54-1.227)/1.227 = 43.0 -> 430k/10k
-boost_fb = Net('BOOST_FB'); U_BOOST[4] += boost_fb
-r = res('430k'); r[1] += vbus54; r[2] += boost_fb
-r = res('10k'); r[1] += boost_fb; r[2] += gnd
-# Compensation: 10nF + 10k series from COMP (tune per app note)
-boost_comp = Net('BOOST_COMP'); U_BOOST[5] += boost_comp
-r = res('10k'); r[1] += boost_comp
-bc_mid = Net('BOOST_COMP_MID'); r[2] += bc_mid
-c = cap('10nF'); c[1] += bc_mid; c[2] += gnd
-# Power good (open drain, pull up)
-boost_pg = Net('BOOST_PG')
-r = res('100k'); r[1] += vin24; r[2] += boost_pg
-U_BOOST[19] += boost_pg
-# Boost output inductor (10uH, high current)
-l = inductor('10uH', 'Inductor_SMD:L_1210_3225Metric')
-l[1] += vin24; l[2] += boost_sw
-# Output caps on 54V rail
-for _ in range(3):
-  c = cap('10uF', 'Capacitor_SMD:C_1206_3216Metric')
-  c[1] += vbus54; c[2] += gnd
-# Input caps on 24V
-for _ in range(2):
-  c = cap('22uF', 'Capacitor_SMD:C_1206_3216Metric')
-  c[1] += vin24; c[2] += gnd
-
-# ============================================================
-# TPS54560 buck converter -- 24V to 5V, SOIC-8+EP
-# (Vin range 4.5-60V, works from 24V directly)
-# ============================================================
-U6 = Part(
-  tool=SKIDL, name='TPS54560', ref_prefix='U',
-  dest=NETLIST,
-  footprint='Package_SO:'
-            'SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.29x3mm',
-  pins=[
-    Pin(num='1', name='BOOT',   func=Pin.types.PASSIVE),
-    Pin(num='2', name='VIN',    func=Pin.types.PWRIN),
-    Pin(num='3', name='EN',     func=Pin.types.INPUT),
-    Pin(num='4', name='SS_TR',  func=Pin.types.PASSIVE),
-    Pin(num='5', name='VSENSE', func=Pin.types.INPUT),
-    Pin(num='6', name='COMP',   func=Pin.types.PASSIVE),
-    Pin(num='7', name='GND',    func=Pin.types.PWRIN),
-    Pin(num='8', name='PH',     func=Pin.types.PWROUT),
-    Pin(num='9', name='EP',     func=Pin.types.PASSIVE),
-  ])
-U6.ref = 'U6'
-
-sw_node = Net('SW_NODE')
-U6[2] += vin24
-U6[7] += gnd
-U6[9] += gnd
-# EN is now the main-domain power-cycle line (was hard-tied to VIN).
-# UVLO divider from VIN keeps main DEFAULT-ON; the STM (PB2) and the
-# dumb watchdog (via D53) pull MAIN_EN low to cut the whole switched
-# domain -- T113 + KSZ + PoE all drop, supervisor rides on standby.
-U6[3] += main_en
-r = res('100k'); r[1] += vin24;   r[2] += main_en    # EN UVLO top
-r = res('13k');  r[1] += main_en; r[2] += gnd        # EN UVLO bottom
-U6[8] += sw_node
-
-# Bootstrap cap: 100nF from BOOT to PH
-c = cap('100nF'); c[1] += Net('BOOT'); c[2] += sw_node
-U6[1] += c[1]
-# Soft-start: 100nF to GND
-c = cap('100nF'); c[1] += Net('SS_TR'); c[2] += gnd
-U6[4] += c[1]
-# Compensation: 15nF + 24.9k series from COMP
-comp_net = Net('COMP'); U6[6] += comp_net
-r = res('24.9k'); r[1] += comp_net
-comp_mid = Net('COMP_MID'); r[2] += comp_mid
-c = cap('15nF'); c[1] += comp_mid; c[2] += gnd
-# Input caps: 2x 2.2uF/100V
-for _ in range(2):
-  c = cap('2.2uF', 'Capacitor_SMD:C_1206_3216Metric')
-  c[1] += vin24; c[2] += gnd
-# Schottky SS54: cathode to SW_NODE, anode to GND
-D1 = Part(
-  tool=SKIDL, name='SS54', ref_prefix='D',
-  dest=NETLIST, value='SS54', footprint='Diode_SMD:D_SMA',
-  pins=[
-    Pin(num='1', name='K', func=Pin.types.PASSIVE),
-    Pin(num='2', name='A', func=Pin.types.PASSIVE),
-  ])
-D1.ref = 'D1'
-D1[1] += sw_node; D1[2] += gnd
-# Output inductor 33uH, output caps 2x 22uF
-l = inductor('33uH'); l[1] += sw_node; l[2] += vdd5
-for _ in range(2):
-  c = cap('22uF', 'Capacitor_SMD:C_0805_2012Metric')
-  c[1] += vdd5; c[2] += gnd
-# Feedback divider 52.3k/10k for 5V (0.8V ref)
-fb_net = Net('FB_5V'); U6[5] += fb_net
-r = res('52.3k'); r[1] += vdd5; r[2] += fb_net
-r = res('10k'); r[1] += fb_net; r[2] += gnd
+# rail-entry bulk decoupling at the interconnect
+# (vin24 here = PROTECTED 24V; fuse/reverse-pol/TVS are on the power board)
+for _n in (vin24, vdd5, vdd33):
+  c = cap('10uF', 'Capacitor_SMD:C_1206_3216Metric'); c[1] += _n; c[2] += gnd
 
 # ============================================================
 # LDO regulators
@@ -426,9 +215,7 @@ def ldo_sot23(name, ref_des):
   u.ref = ref_des
   return u
 
-# U2: AMS1117-3.3 (5V -> 3.3V)
-U2 = ldo_sot223('AMS1117-3.3', 'U2')
-U2[3] += vdd5; U2[2] += vdd33; U2[1] += gnd
+# VDD_3V3 arrives from the power board via J9[9] (AMS1117 3V3 LDO moved there).
 # U3: AP2112K-2.5 (3.3V -> 2.5V, KSZ AVDDH/VDDHS)
 U3 = ldo_sot23('AP2112K-2.5', 'U3')
 U3[1] += vdd33; U3[2] += gnd; U3[3] += vdd33; U3[5] += vdd25
@@ -443,31 +230,36 @@ U4[1] += vdd33; U4[2] += gnd; U4[3] += vdd33; U4[5] += vdd12
 # for T113-S3 VDD-CORE. Pin 1=SW,2=GND,3=EN,4=FB,5=VIN,6=MODE
 # ============================================================
 U11 = Part(
-  tool=SKIDL, name='TLV62569', ref_prefix='U', dest=NETLIST,
+  # TLV62569P (DDC = SOT23-6, has PG). Pinout per datasheet SLVSDG1C:
+  # 1=EN 2=GND 3=SW 4=VIN 5=PG 6=FB. (s5 had a fabricated pinout w/ a
+  # nonexistent MODE pin and VIN/FB/SW/EN scrambled.)
+  tool=SKIDL, name='TLV62569PDDCR', ref_prefix='U', dest=NETLIST,
   footprint='Package_TO_SOT_SMD:SOT-23-6',
   pins=[
-    Pin(num='1', name='SW',   func=Pin.types.PWROUT),
-    Pin(num='2', name='GND',  func=Pin.types.PWRIN),
-    Pin(num='3', name='EN',   func=Pin.types.INPUT),
-    Pin(num='4', name='FB',   func=Pin.types.INPUT),
-    Pin(num='5', name='VIN',  func=Pin.types.PWRIN),
-    Pin(num='6', name='MODE', func=Pin.types.INPUT),
+    Pin(num='1', name='EN',  func=Pin.types.INPUT),
+    Pin(num='2', name='GND', func=Pin.types.PWRIN),
+    Pin(num='3', name='SW',  func=Pin.types.PWROUT),
+    Pin(num='4', name='VIN', func=Pin.types.PWRIN),
+    Pin(num='5', name='PG',  func=Pin.types.OPENCOLL),
+    Pin(num='6', name='FB',  func=Pin.types.INPUT),
   ])
 U11.ref = 'U11'
-U11[5] += vdd5
+U11[4] += vdd5   # VIN
 U11[2] += gnd
-U11[3] += vdd5   # EN on
-U11[6] += gnd    # MODE: PFM/PWM auto
+U11[1] += vdd5   # EN on
 core_sw = Net('CORE_SW')
-U11[1] += core_sw
+U11[3] += core_sw   # SW
 l = inductor('1uH', 'Inductor_SMD:L_0805_2012Metric')
 l[1] += core_sw; l[2] += vcore
+# PG is open-drain: pull up to VIN
+core_pg = Net('CORE_PG'); U11[5] += core_pg
+r = res('100k'); r[1] += vdd5; r[2] += core_pg
 decouple(vdd5, gnd, 1, '10uF', 'Capacitor_SMD:C_0805_2012Metric')
 for _ in range(2):
   c = cap('22uF', 'Capacitor_SMD:C_0805_2012Metric')
   c[1] += vcore; c[2] += gnd
 # FB divider for 0.9V (0.6V ref): R_top/R_bot=(0.9-0.6)/0.6=0.5
-fb09 = Net('FB_0V9'); U11[4] += fb09
+fb09 = Net('FB_0V9'); U11[6] += fb09
 r = res('50k');  r[1] += vcore; r[2] += fb09
 r = res('100k'); r[1] += fb09;  r[2] += gnd
 
@@ -903,22 +695,28 @@ def tc(name, net):
   """Connect the T113 pin for `name` to `net` (LHS-safe)."""
   U7[_T113_NAME2BALL[name]] += net
 
-# --- T113 power ---
-tc('VDD-CORE0', vcore)
-tc('VDD-CORE1', vcore)
-for _n in ['VDD-SYS0', 'VDD-SYS1', 'VDD-SYS2', 'VCC-IO', 'VCC-PE',
-           'VCC-PD', 'VCC-PG', 'VCC-PLL', 'VCC-RTC']:
+# --- T113 power (rail voltages per official datasheet v1.6 Table 5-2) ---
+# CORE domain 0.9V: VDD-CORE *and* VDD-SYS (s5 had VDD-SYS on 3.3V = destroys chip)
+for _n in ['VDD-CORE0', 'VDD-CORE1', 'VDD-SYS0', 'VDD-SYS1', 'VDD-SYS2']:
+  tc(_n, vcore)
+# 3.3V I/O banks (VCC-PE/PD/PG are selectable; 3.3V chosen for the KSZ RGMII)
+for _n in ['VCC-IO', 'VCC-PE', 'VCC-PD', 'VCC-PG']:
   tc(_n, vdd33)
-for _n in ['VCC-DRAM0', 'VCC-DRAM1', 'VDD18-DRAM']:
+# 1.8V: PLL, RTC, analog, DRAM-controller (s5 had PLL/RTC/AVCC on 3.3V = over-volt)
+for _n in ['VCC-PLL', 'VCC-RTC', 'AVCC', 'VDD18-DRAM']:
   tc(_n, vdd18)
-tc('AVCC', vdd33)          # analog 3.3 (add ferrite bead in layout)
 tc('AGND', gnd)
 U7['129'] += gnd           # exposed pad = GND (MANDATORY)
-tc('LDO-IN', vdd33)
-for _n in ['LDOA-OUT', 'LDOB-OUT']:   # internal LDO outs: bypass
-  _ldo = Net(f'T113_{_n.replace("-","_")}')
-  U7[_T113_NAME2BALL[_n]] += _ldo
-  c = cap('1uF'); c[1] += _ldo; c[2] += gnd
+tc('LDO-IN', vdd33)        # internal-LDO input, 2.4-3.6V
+# Internal LDOs: LDOA-OUT=1.8V, LDOB-OUT=1.5V. Bypass + use LDOB (1.5V) to feed
+# the DDR3 I/O rail (s5 had VCC-DRAM on 1.8V; DDR3 I/O is 1.5V).
+_ldob = Net('T113_LDOB_OUT')  # 1.5V
+U7[_T113_NAME2BALL['LDOB-OUT']] += _ldob
+c = cap('1uF'); c[1] += _ldob; c[2] += gnd
+_ldoa = Net('T113_LDOA_OUT')  # 1.8V
+U7[_T113_NAME2BALL['LDOA-OUT']] += _ldoa
+c = cap('1uF'); c[1] += _ldoa; c[2] += gnd
+tc('VCC-DRAM0', _ldob); tc('VCC-DRAM1', _ldob)   # DDR3 I/O 1.5V from LDOB
 # Unused analog/video supply rails -- TODO confirm against
 # datasheet 5.3 whether these may be left unpowered; named nets
 # (not grounded) so the intent is explicit, not silent.
