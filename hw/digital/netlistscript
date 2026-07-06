@@ -1,0 +1,1506 @@
+#!/usr/bin/env python3
+"""
+V5: 5-port managed GbE PoE switch with Allwinner T113-S3.
+
+KSZ9477S 7-port switch:
+  - Ports 1-5: 10/100/1000 copper PHY -> LPJG0926HENL PoE+
+    GbE MagJack (integrated magnetics + LEDs + PoE center taps).
+  - Port 6: RGMII (MAC) -> Allwinner T113-S3 (management CPU).
+  - Port 7: SGMII/SerDes -> left unused (terminated, S_REXT kept).
+
+Allwinner T113-S3 (eLQFP128, 14x14x1.4mm) -- SiP 128MB DDR3, so
+NO external DRAM and NO DDR signal layer. Manages the KSZ over
+SPI0; debug UART0; USB; SPI boot flash. EMAC drives KSZ port 6
+over RGMII from the PG bank (frees all 5 copper PHYs for users).
+
+PoE PSE: 2x TPS23861 (4 channels each) covers all 5 ports.
+24V DC in (Phoenix Contact pluggable terminal, 3-pin: +24V/GND/PE)
+-> LM5122 boost (24V to 54V for PoE) + TPS54560 buck (24V to 5V)
+-> LDO chain (3.3 / 2.5 / 1.2V for KSZ) + 0.9V buck (T113
+VDD-CORE) + 1.8V LDO (VDD18-DRAM).
+
+4-layer stackup intent (no external DDR3 routing).
+
+Pin sources:
+  T113-S3:   Allwinner T113-S3 Datasheet v1.6, sec 4.2/4.3.
+             Real ball numbers; see T113S3_PINMAP.md.
+  KSZ9477S:  DS00002392C Table 3-1.
+  TPS54560/TPS23861: TI datasheets.
+
+NOTE: only ONE dedicated T113 ground pin (AGND=91); the eLQFP128
+exposed pad is the main GND return -- EP->GND is mandatory.
+"""
+
+import os, glob
+# Delete any cached SKiDL backup lib to prevent stale part defs
+# from overriding the inline Part() definitions below.
+_here = os.path.dirname(os.path.abspath(__file__))
+for _f in glob.glob(os.path.join(_here, '*_sklib.py')):
+  os.remove(_f)
+
+from skidl import *
+
+# ============================================================
+# Stable ref counters
+# ============================================================
+_cref = [0]
+_rref = [0]
+_lref = [0]
+_qref = [0]
+_ledref = [0]
+
+def cap(value, fp='Capacitor_SMD:C_0402_1005Metric'):
+  _cref[0] += 1
+  c = Part(
+    tool=SKIDL, name='C', ref_prefix='C',
+    dest=NETLIST, value=value, footprint=fp,
+    pins=[
+      Pin(num='1', name='1', func=Pin.types.PASSIVE),
+      Pin(num='2', name='2', func=Pin.types.PASSIVE),
+    ])
+  c.ref = f'C{_cref[0]}'
+  return c
+
+def res(value, fp='Resistor_SMD:R_0402_1005Metric'):
+  _rref[0] += 1
+  r = Part(
+    tool=SKIDL, name='R', ref_prefix='R',
+    dest=NETLIST, value=value, footprint=fp,
+    pins=[
+      Pin(num='1', name='1', func=Pin.types.PASSIVE),
+      Pin(num='2', name='2', func=Pin.types.PASSIVE),
+    ])
+  r.ref = f'R{_rref[0]}'
+  return r
+
+def inductor(value, fp='Inductor_SMD:L_1210_3225Metric'):
+  _lref[0] += 1
+  l = Part(
+    tool=SKIDL, name='L', ref_prefix='L',
+    dest=NETLIST, value=value, footprint=fp,
+    pins=[
+      Pin(num='1', name='1', func=Pin.types.PASSIVE),
+      Pin(num='2', name='2', func=Pin.types.PASSIVE),
+    ])
+  l.ref = f'L{_lref[0]}'
+  return l
+
+def led():
+  """0603 LED: pin 1=A(anode), pin 2=K(cathode)."""
+  _ledref[0] += 1
+  d = Part(
+    tool=SKIDL, name='LED', ref_prefix='D',
+    dest=NETLIST,
+    footprint='LED_SMD:LED_0603_1608Metric',
+    pins=[
+      Pin(num='1', name='A', func=Pin.types.PASSIVE),
+      Pin(num='2', name='K', func=Pin.types.PASSIVE),
+    ])
+  d.ref = f'D{_ledref[0] + 2}'  # D1=SS54, D2=1N4148
+  return d
+
+def nfet(ref_des):
+  """N-channel MOSFET in SOT-223: pin 1=G, 2=D(tab), 3=S."""
+  _qref[0] += 1
+  q = Part(
+    tool=SKIDL, name='NMOS', ref_prefix='Q',
+    dest=NETLIST,
+    footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
+    pins=[
+      Pin(num='1', name='G', func=Pin.types.INPUT),
+      Pin(num='2', name='D', func=Pin.types.PASSIVE),
+      Pin(num='3', name='S', func=Pin.types.PASSIVE),
+    ])
+  q.ref = ref_des
+  return q
+
+def decouple(rail, gnd, n, value='100nF',
+             fp='Capacitor_SMD:C_0402_1005Metric'):
+  """Place n decoupling caps between rail and gnd."""
+  for _ in range(n):
+    c = cap(value, fp)
+    c[1] += rail
+    c[2] += gnd
+
+# ============================================================
+# Power nets
+# ============================================================
+vin24 = Net('VIN_24V')
+vbus54 = Net('VBUS_54V')     # 54V PoE rail (from boost)
+vdd5  = Net('VDD_5V')
+earth = Net('PE')            # protective earth
+vdd33 = Net('VDD_3V3')
+vdd25 = Net('VDD_2V5')      # KSZ AVDDH/VDDHS
+vdd12 = Net('VDD_1V2')      # KSZ core rails
+vcore = Net('VDD_CORE')     # T113-S3 VDD-CORE 0.9V (buck)
+vdd18 = Net('VDD_1V8')      # T113-S3 VDD18-DRAM (LDO)
+gnd   = Net('GND')
+v3v3_sb = Net('VDD_3V3_SB')  # always-on standby (supervisor + dumb wd)
+main_en = Net('MAIN_EN')     # TPS54560 EN -- STM/dumb-wd power-cycle line
+vpse33 = Net('VDD_3V3_PSE')  # PoE housekeeping 3.3V -- always on (rides cycle)
+pse_reset = Net('PSE_RESET_N') # STM pulls low = reset PSEs = shed PoE (thermal)
+
+# ============================================================
+# Power input -- 3-pin Phoenix Contact pluggable terminal block
+# Pin 1=+24V, pin 2=GND(0V), pin 3=PE(earth)
+# MSTB 2,5/3-GF-5,08 (5.08mm pitch, 3-pin, horizontal,
+# threaded flange for locking). Mates with MSTB 2,5/3-ST-5,08.
+# Place at bottom board edge, rotate so wires exit downward.
+# ============================================================
+J1 = Part(
+  tool=SKIDL, name='MSTB2,5/3-GF-5,08_1776511', ref_prefix='J',
+  dest=NETLIST,
+  footprint='Connector_Phoenix_MSTB:'
+            'PhoenixContact_MSTB_2,5_3-GF-5,08_1x03'
+            '_P5.08mm_Horizontal_ThreadedFlange',
+  pins=[
+    Pin(num='1', name='24V',  func=Pin.types.PASSIVE),
+    Pin(num='2', name='GND',  func=Pin.types.PASSIVE),
+    Pin(num='3', name='PE',   func=Pin.types.PASSIVE),
+  ])
+J1.ref = 'J1'
+# ============================================================
+# INPUT PROTECTION FRONT-END (24V industrial)
+#   J1(+24V) -> fuse -> reverse-polarity P-FET -> TVS/MOV
+#              -> inrush NTC -> ferrite pi-filter -> VIN_24V
+# Essentials populated for the proto; MOV + ferrite cover the
+# IEC 61000-4-5 surge / -4-4 EFT hardening for the cert build.
+# Reverse-polarity FET + fuse + TVS never DNP -- bench insurance.
+# ============================================================
+vin_raw   = Net('VIN_RAW')
+vin_fused = Net('VIN_FUSED')
+vin_prot  = Net('VIN_PROT')       # after reverse-polarity FET
+rp_gate   = Net('RP_GATE')
+
+J1[1] += vin_raw   # +24V raw (pre-protection); protected -> VIN_24V below
+J1[2] += gnd
+J1[3] += earth    # PE routed to chassis/shield pad
+
+def two_pin(name, ref, fp):
+  """Generic 2-terminal part (fuse / TVS / MOV / NTC / zener / switch)."""
+  import re as _re
+  p = Part(tool=SKIDL, name=name, ref_prefix=_re.sub(r'\d+$', '', ref),
+           dest=NETLIST, footprint=fp,
+           pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+                 Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+  p.ref = ref
+  return p
+
+# F1: 2A time-lag input fuse
+F1 = two_pin('Fuse_2A_TL', 'F1', 'Fuse:Fuse_1206_3216Metric')
+F1[1] += vin_raw; F1[2] += vin_fused
+
+# Q50: P-channel MOSFET, high-side reverse-polarity (ideal-diode)
+Q50 = Part(tool=SKIDL, name='BSP315P', ref_prefix='Q', dest=NETLIST,
+           footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
+           pins=[Pin(num='1', name='G', func=Pin.types.INPUT),
+                 Pin(num='2', name='D', func=Pin.types.PASSIVE),
+                 Pin(num='3', name='S', func=Pin.types.PASSIVE)])
+Q50.ref = 'Q50'
+Q50[3] += vin_fused    # source = input
+Q50[2] += vin_prot     # drain  = load
+Q50[1] += rp_gate
+r = res('100k'); r[1] += rp_gate; r[2] += gnd            # gate pull-down
+D51 = two_pin('BZX84C12', 'D51', 'Package_TO_SOT_SMD:SOT-23')
+D51[1] += vin_fused; D51[2] += rp_gate                   # Vgs clamp (12V)
+
+# TVS clamp + MOV (surge energy, cert build)
+D50 = two_pin('SMBJ30A', 'D50', 'Diode_SMD:D_SMB')
+D50[1] += vin_prot; D50[2] += gnd
+# RV1 MOV -- DNP by default; populate only if a surge cert (IEC 61000-4-5)
+# requires it. The TVS (D50) handles normal 24V transients.
+RV1 = two_pin('MOV_S14K30_DNP', 'RV1', 'Varistor:RV_Disc_D9mm_W3.9mm_P5mm')
+RV1[1] += vin_prot; RV1[2] += gnd
+
+# Ferrite bead -> VIN_24V. (Inrush NTC dropped -- the TPS54560/LM5122
+# soft-start and 24V inrush is modest.)
+FB1 = two_pin('BLM31PG601SN1', 'FB1', 'Inductor_SMD:L_1206_3216Metric')
+FB1[1] += vin_prot; FB1[2] += vin24
+for _n in (vin_prot, vin24):
+  c = cap('10uF', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += _n; c[2] += gnd
+
+# Input protection: 100uF bulk + TVS on 24V input
+c = cap('100uF', 'Capacitor_SMD:C_1206_3216Metric')
+c[1] += vin24; c[2] += gnd
+
+# ============================================================
+# LM5122 boost converter -- 24V to 54V for PoE rail
+# WQFN-20 (4x4mm). Synchronous boost controller.
+# Key pins: VIN=18, EN=17, HO=12, LO=14, SW=13,
+#   BST=11, SS=7, COMP=5, FB=4, PGND=15, AGND=3, VCC=10
+# ============================================================
+U_BOOST = Part(
+  tool=SKIDL, name='LM5122', ref_prefix='U', dest=NETLIST,
+  footprint='Package_DFN_QFN:QFN-20-1EP_4x4mm_P0.5mm_EP2.7x2.7mm',
+  pins=[
+    Pin(num='1',  name='DEMB', func=Pin.types.INPUT),
+    Pin(num='2',  name='ILIM', func=Pin.types.INPUT),
+    Pin(num='3',  name='AGND', func=Pin.types.PWRIN),
+    Pin(num='4',  name='FB',   func=Pin.types.INPUT),
+    Pin(num='5',  name='COMP', func=Pin.types.PASSIVE),
+    Pin(num='6',  name='RT',   func=Pin.types.PASSIVE),
+    Pin(num='7',  name='SS',   func=Pin.types.PASSIVE),
+    Pin(num='8',  name='SYNC', func=Pin.types.INPUT),
+    Pin(num='9',  name='UVLO', func=Pin.types.INPUT),
+    Pin(num='10', name='VCC',  func=Pin.types.PWROUT),
+    Pin(num='11', name='BST',  func=Pin.types.PASSIVE),
+    Pin(num='12', name='HO',   func=Pin.types.OUTPUT),
+    Pin(num='13', name='SW',   func=Pin.types.PASSIVE),
+    Pin(num='14', name='LO',   func=Pin.types.OUTPUT),
+    Pin(num='15', name='PGND', func=Pin.types.PWRIN),
+    Pin(num='16', name='CSP',  func=Pin.types.INPUT),
+    Pin(num='17', name='EN',   func=Pin.types.INPUT),
+    Pin(num='18', name='VIN',  func=Pin.types.PWRIN),
+    Pin(num='19', name='PG',   func=Pin.types.OPENCOLL),
+    Pin(num='20', name='CSN',  func=Pin.types.INPUT),
+    Pin(num='21', name='EP',   func=Pin.types.PASSIVE),
+  ])
+U_BOOST.ref = 'U14'
+U_BOOST[18] += vin24        # VIN
+U_BOOST[17] += vin24        # EN (on when input present)
+U_BOOST[3]  += gnd          # AGND
+U_BOOST[15] += gnd          # PGND
+U_BOOST[21] += gnd          # EP
+U_BOOST[1]  += gnd          # DEMB (GND = forced CCM)
+U_BOOST[8]  += gnd          # SYNC (GND = internal clock)
+# VCC bypass
+boost_vcc = Net('BOOST_VCC')
+decouple(boost_vcc, gnd, 1, '4.7uF',
+         'Capacitor_SMD:C_0805_2012Metric')
+U_BOOST[10] += boost_vcc
+# Bootstrap cap
+bst_net = Net('BST_BOOST')
+U_BOOST[11] += bst_net
+boost_sw = Net('BOOST_SW')
+U_BOOST[13] += boost_sw
+c = cap('100nF'); c[1] += bst_net; c[2] += boost_sw
+# High/low gate drive -> external FETs (simplified: using
+# integrated FET topology or external N-FETs — TO BE REFINED
+# per LM5122 reference design. For now, nets are named.)
+U_BOOST[12] += Net('BOOST_HO')   # high-side gate
+U_BOOST[14] += Net('BOOST_LO')   # low-side gate
+# Current sense across inductor
+U_BOOST[16] += Net('BOOST_CSP')  # sense +
+U_BOOST[20] += Net('BOOST_CSN')  # sense -
+# Soft-start
+boost_ss = Net('BOOST_SS')
+c = cap('100nF'); c[1] += boost_ss; c[2] += gnd
+U_BOOST[7] += boost_ss
+# Frequency set (200kHz: RT ~150k per datasheet)
+boost_rt = Net('BOOST_RT')
+r = res('150k'); r[1] += boost_rt; r[2] += gnd
+U_BOOST[6] += boost_rt
+# UVLO: set for 20V turn-on (divider from VIN)
+uvlo_net = Net('BOOST_UVLO')
+U_BOOST[9] += uvlo_net
+r = res('100k'); r[1] += vin24; r[2] += uvlo_net
+r = res('6.8k'); r[1] += uvlo_net; r[2] += gnd
+# ILIM: set with resistor to GND (per datasheet)
+boost_ilim = Net('BOOST_ILIM')
+r = res('33k'); r[1] += boost_ilim; r[2] += gnd
+U_BOOST[2] += boost_ilim
+# FB divider, 54V out, 1.227V ref (802.3at/bt need PSE >=50V; 48V was af-only):
+# R_top/R_bot = (54-1.227)/1.227 = 43.0 -> 430k/10k
+boost_fb = Net('BOOST_FB'); U_BOOST[4] += boost_fb
+r = res('430k'); r[1] += vbus54; r[2] += boost_fb
+r = res('10k'); r[1] += boost_fb; r[2] += gnd
+# Compensation: 10nF + 10k series from COMP (tune per app note)
+boost_comp = Net('BOOST_COMP'); U_BOOST[5] += boost_comp
+r = res('10k'); r[1] += boost_comp
+bc_mid = Net('BOOST_COMP_MID'); r[2] += bc_mid
+c = cap('10nF'); c[1] += bc_mid; c[2] += gnd
+# Power good (open drain, pull up)
+boost_pg = Net('BOOST_PG')
+r = res('100k'); r[1] += vin24; r[2] += boost_pg
+U_BOOST[19] += boost_pg
+# Boost output inductor (10uH, high current)
+l = inductor('10uH', 'Inductor_SMD:L_1210_3225Metric')
+l[1] += vin24; l[2] += boost_sw
+# Output caps on 54V rail
+for _ in range(3):
+  c = cap('10uF', 'Capacitor_SMD:C_1206_3216Metric')
+  c[1] += vbus54; c[2] += gnd
+# Input caps on 24V
+for _ in range(2):
+  c = cap('22uF', 'Capacitor_SMD:C_1206_3216Metric')
+  c[1] += vin24; c[2] += gnd
+
+# ============================================================
+# TPS54560 buck converter -- 24V to 5V, SOIC-8+EP
+# (Vin range 4.5-60V, works from 24V directly)
+# ============================================================
+U6 = Part(
+  tool=SKIDL, name='TPS54560', ref_prefix='U',
+  dest=NETLIST,
+  footprint='Package_SO:'
+            'SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.29x3mm',
+  pins=[
+    Pin(num='1', name='BOOT',   func=Pin.types.PASSIVE),
+    Pin(num='2', name='VIN',    func=Pin.types.PWRIN),
+    Pin(num='3', name='EN',     func=Pin.types.INPUT),
+    Pin(num='4', name='SS_TR',  func=Pin.types.PASSIVE),
+    Pin(num='5', name='VSENSE', func=Pin.types.INPUT),
+    Pin(num='6', name='COMP',   func=Pin.types.PASSIVE),
+    Pin(num='7', name='GND',    func=Pin.types.PWRIN),
+    Pin(num='8', name='PH',     func=Pin.types.PWROUT),
+    Pin(num='9', name='EP',     func=Pin.types.PASSIVE),
+  ])
+U6.ref = 'U6'
+
+sw_node = Net('SW_NODE')
+U6[2] += vin24
+U6[7] += gnd
+U6[9] += gnd
+# EN is now the main-domain power-cycle line (was hard-tied to VIN).
+# UVLO divider from VIN keeps main DEFAULT-ON; the STM (PB2) and the
+# dumb watchdog (via D53) pull MAIN_EN low to cut the whole switched
+# domain -- T113 + KSZ + PoE all drop, supervisor rides on standby.
+U6[3] += main_en
+r = res('100k'); r[1] += vin24;   r[2] += main_en    # EN UVLO top
+r = res('13k');  r[1] += main_en; r[2] += gnd        # EN UVLO bottom
+U6[8] += sw_node
+
+# Bootstrap cap: 100nF from BOOT to PH
+c = cap('100nF'); c[1] += Net('BOOT'); c[2] += sw_node
+U6[1] += c[1]
+# Soft-start: 100nF to GND
+c = cap('100nF'); c[1] += Net('SS_TR'); c[2] += gnd
+U6[4] += c[1]
+# Compensation: 15nF + 24.9k series from COMP
+comp_net = Net('COMP'); U6[6] += comp_net
+r = res('24.9k'); r[1] += comp_net
+comp_mid = Net('COMP_MID'); r[2] += comp_mid
+c = cap('15nF'); c[1] += comp_mid; c[2] += gnd
+# Input caps: 2x 2.2uF/100V
+for _ in range(2):
+  c = cap('2.2uF', 'Capacitor_SMD:C_1206_3216Metric')
+  c[1] += vin24; c[2] += gnd
+# Schottky SS54: cathode to SW_NODE, anode to GND
+D1 = Part(
+  tool=SKIDL, name='SS54', ref_prefix='D',
+  dest=NETLIST, value='SS54', footprint='Diode_SMD:D_SMA',
+  pins=[
+    Pin(num='1', name='K', func=Pin.types.PASSIVE),
+    Pin(num='2', name='A', func=Pin.types.PASSIVE),
+  ])
+D1.ref = 'D1'
+D1[1] += sw_node; D1[2] += gnd
+# Output inductor 33uH, output caps 2x 22uF
+l = inductor('33uH'); l[1] += sw_node; l[2] += vdd5
+for _ in range(2):
+  c = cap('22uF', 'Capacitor_SMD:C_0805_2012Metric')
+  c[1] += vdd5; c[2] += gnd
+# Feedback divider 52.3k/10k for 5V (0.8V ref)
+fb_net = Net('FB_5V'); U6[5] += fb_net
+r = res('52.3k'); r[1] += vdd5; r[2] += fb_net
+r = res('10k'); r[1] += fb_net; r[2] += gnd
+
+# ============================================================
+# LDO regulators
+# ============================================================
+def ldo_sot223(name, ref_des):
+  """SOT-223 LDO: pin 1=GND, pin 2=VO, pin 3=VI."""
+  u = Part(
+    tool=SKIDL, name=name, ref_prefix='U', dest=NETLIST,
+    footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
+    pins=[
+      Pin(num='1', name='GND', func=Pin.types.PWRIN),
+      Pin(num='2', name='VO',  func=Pin.types.PWROUT),
+      Pin(num='3', name='VI',  func=Pin.types.PWRIN),
+    ])
+  u.ref = ref_des
+  return u
+
+def ldo_sot23(name, ref_des):
+  """SOT-23-5 LDO (AP2112K): 1=VIN,2=GND,3=EN,5=VOUT."""
+  u = Part(
+    tool=SKIDL, name=name, ref_prefix='U', dest=NETLIST,
+    footprint='Package_TO_SOT_SMD:SOT-23-5',
+    pins=[
+      Pin(num='1', name='VIN',  func=Pin.types.PWRIN),
+      Pin(num='2', name='GND',  func=Pin.types.PWRIN),
+      Pin(num='3', name='EN',   func=Pin.types.INPUT),
+      Pin(num='4', name='NC',   func=Pin.types.NOCONNECT),
+      Pin(num='5', name='VOUT', func=Pin.types.PWROUT),
+    ])
+  u.ref = ref_des
+  return u
+
+# U2: AMS1117-3.3 (5V -> 3.3V)
+U2 = ldo_sot223('AMS1117-3.3', 'U2')
+U2[3] += vdd5; U2[2] += vdd33; U2[1] += gnd
+# U3: AP2112K-2.5 (3.3V -> 2.5V, KSZ AVDDH/VDDHS)
+U3 = ldo_sot23('AP2112K-2.5', 'U3')
+U3[1] += vdd33; U3[2] += gnd; U3[3] += vdd33; U3[5] += vdd25
+# U4: AP2112K-1.2 (3.3V -> 1.2V, KSZ + H3 VDD_SYS/CPUS)
+# NOTE: combined 1.2V load may approach AP2112K 600mA limit;
+# upgrade to a 1.2V buck if bench current is high.
+U4 = ldo_sot23('AP2112K-1.2', 'U4')
+U4[1] += vdd33; U4[2] += gnd; U4[3] += vdd33; U4[5] += vdd12
+
+# ============================================================
+# 0.9V core rail -- TLV62569 buck (5V -> 0.9V), SOT-23-6
+# for T113-S3 VDD-CORE. Pin 1=SW,2=GND,3=EN,4=FB,5=VIN,6=MODE
+# ============================================================
+U11 = Part(
+  tool=SKIDL, name='TLV62569', ref_prefix='U', dest=NETLIST,
+  footprint='Package_TO_SOT_SMD:SOT-23-6',
+  pins=[
+    Pin(num='1', name='SW',   func=Pin.types.PWROUT),
+    Pin(num='2', name='GND',  func=Pin.types.PWRIN),
+    Pin(num='3', name='EN',   func=Pin.types.INPUT),
+    Pin(num='4', name='FB',   func=Pin.types.INPUT),
+    Pin(num='5', name='VIN',  func=Pin.types.PWRIN),
+    Pin(num='6', name='MODE', func=Pin.types.INPUT),
+  ])
+U11.ref = 'U11'
+U11[5] += vdd5
+U11[2] += gnd
+U11[3] += vdd5   # EN on
+U11[6] += gnd    # MODE: PFM/PWM auto
+core_sw = Net('CORE_SW')
+U11[1] += core_sw
+l = inductor('1uH', 'Inductor_SMD:L_0805_2012Metric')
+l[1] += core_sw; l[2] += vcore
+decouple(vdd5, gnd, 1, '10uF', 'Capacitor_SMD:C_0805_2012Metric')
+for _ in range(2):
+  c = cap('22uF', 'Capacitor_SMD:C_0805_2012Metric')
+  c[1] += vcore; c[2] += gnd
+# FB divider for 0.9V (0.6V ref): R_top/R_bot=(0.9-0.6)/0.6=0.5
+fb09 = Net('FB_0V9'); U11[4] += fb09
+r = res('50k');  r[1] += vcore; r[2] += fb09
+r = res('100k'); r[1] += fb09;  r[2] += gnd
+
+# ============================================================
+# 1.8V rail -- AP2112K-1.8 LDO (3.3V -> 1.8V) for T113
+# VDD18-DRAM (SiP DDR3 I/O; low current).
+# ============================================================
+U12 = ldo_sot23('AP2112K-1.8', 'U12')
+U12[1] += vdd33; U12[2] += gnd; U12[3] += vdd33; U12[5] += vdd18
+for _ in range(2):
+  c = cap('10uF', 'Capacitor_SMD:C_0805_2012Metric')
+  c[1] += vdd18; c[2] += gnd
+
+# Bulk caps per rail
+for rail in [vin24, vdd5, vdd33, vdd25, vdd12, vcore, vdd18]:
+  c = cap('10uF', 'Capacitor_SMD:C_0805_2012Metric')
+  c[1] += rail; c[2] += gnd
+
+# ============================================================
+# KSZ9477S -- 128-TQFP-EP, DS00002392C
+# ============================================================
+U1 = Part(
+  tool=SKIDL, name='KSZ9477S', ref_prefix='U', dest=NETLIST,
+  footprint='chips:QFP40P1600X1600X120-129N',
+  pins=[
+    Pin(num=str(i), name=f'P{i}', func=Pin.types.BIDIR)
+    for i in range(1, 129)
+  ] + [
+    Pin(num='129', name='EP', func=Pin.types.PASSIVE),
+  ] + [
+    Pin(num=f'E_{i}', name=f'EP_{i}', func=Pin.types.PASSIVE)
+    for i in range(1, 65)
+  ])
+U1.ref = 'U1'
+
+# KSZ9477S power pins
+for p in [3, 14, 19, 30, 36, 41, 114, 119, 124]:  # AVDDL 1.2
+  U1[p] += vdd12
+for p in [10, 22, 33, 44, 111, 122, 128]:          # AVDDH 2.5
+  U1[p] += vdd25
+for p in [11, 23, 45, 56, 66, 70, 87, 104, 110]:   # DVDDL 1.2
+  U1[p] += vdd12
+for p in [61, 68, 99]:                              # VDDIO 3.3
+  U1[p] += vdd33
+for p in [71, 84]:                                  # VDDLS 1.2
+  U1[p] += vdd12
+for p in [72, 83]:                                  # VDDHS 2.5
+  U1[p] += vdd25
+for p in [46, 47, 69, 75, 77, 80, 107, 109, 123, 129]:  # GND
+  U1[p] += gnd
+for i in range(1, 65):                              # EP segments
+  U1[f'E_{i}'] += gnd
+
+# KSZ decoupling: 9x2.5V, 20x1.2V, 3x3.3V
+decouple(vdd25, gnd, 9)
+decouple(vdd12, gnd, 20)
+decouple(vdd33, gnd, 3)
+
+# KSZ crystal 25MHz
+Y1 = Part(
+  tool=SKIDL, name='Crystal_25MHz', ref_prefix='Y',
+  dest=NETLIST, value='25MHz',
+  footprint='Crystal:Crystal_SMD_2016-4Pin_2.0x1.6mm',
+  pins=[
+    Pin(num='1', name='1', func=Pin.types.PASSIVE),
+    Pin(num='2', name='2', func=Pin.types.PASSIVE),
+  ])
+xi = Net('KSZ_XI'); xo = Net('KSZ_XO')
+U1[126] += xi; U1[125] += xo
+Y1[1] += xi; Y1[2] += xo
+c = cap('15pF'); c[1] += xi; c[2] += gnd
+c = cap('15pF'); c[1] += xo; c[2] += gnd
+
+# KSZ reference resistors
+r = res('6.04k'); iset = Net('KSZ_ISET'); r[1] += iset; r[2] += gnd
+U1[127] += iset
+r = res('191'); srext = Net('KSZ_S_REXT'); r[1] += srext; r[2] += gnd
+U1[76] += srext   # port-7 SerDes S_REXT (kept even though P7 unused)
+
+# KSZ reset RC + diode
+reset_net = Net('KSZ_RESET_N'); U1[96] += reset_net
+r = res('10k'); r[1] += vdd33; r[2] += reset_net
+c = cap('10uF', 'Capacitor_SMD:C_0805_2012Metric')
+c[1] += reset_net; c[2] += gnd
+D2 = Part(
+  tool=SKIDL, name='D_1N4148', ref_prefix='D',
+  dest=NETLIST, value='1N4148', footprint='Diode_SMD:D_SOD-323',
+  pins=[
+    Pin(num='1', name='K', func=Pin.types.PASSIVE),
+    Pin(num='2', name='A', func=Pin.types.PASSIVE),
+  ])
+D2.ref = 'D2'
+D2[2] += reset_net; D2[1] += vdd33
+
+# KSZ SPI management (to H3 SPI0) + INT
+spi_clk  = Net('SPI_CLK')
+spi_mosi = Net('SPI_MOSI')
+spi_miso = Net('SPI_MISO')
+spi_cs   = Net('SPI_CS_N')
+intrp    = Net('INTRP_N')
+U1[101] += spi_clk
+U1[98]  += spi_mosi
+U1[97]  += spi_miso
+U1[100] += spi_cs
+U1[94]  += intrp
+# MOSI/CS high at reset selects SPI mode
+for net, val in [(spi_mosi, '4.7k'), (spi_cs, '4.7k'),
+                 (intrp, '10k')]:
+  r = res(val); r[1] += vdd33; r[2] += net
+
+# KSZ misc straps
+pme = Net('PME_N'); U1[93] += pme
+r = res('10k'); r[1] += vdd33; r[2] += pme
+synclko = Net('SYNCLKO'); U1[95] += synclko
+r = res('10k'); r[1] += vdd33; r[2] += synclko
+iba = Net('IBA'); U1[67] += iba
+r = res('1k'); r[1] += iba; r[2] += gnd
+
+# KSZ port-7 SerDes (unused) -- leave SerDes I/O floating
+U1[78] += Net('S_IN7M')
+U1[79] += Net('S_IN7P')
+U1[81] += Net('S_OUT7P')
+U1[82] += Net('S_OUT7M')
+
+# ============================================================
+# Ports 1-5: KSZ PHY -> LPJG0926HENL PoE+ GbE MagJack.
+# Integrated magnetics + LEDs + PoE center taps in one part.
+# Each port uses all 4 pairs = full 1000BASE-T.
+#
+# LPJG0926HENL pinout (20 pins):
+#   1=TD1+, 2=TD1-, 3=TD2+, 6=TD2-, 7=TD3+, 8=TD3-,
+#   9=TD4+, 10=TD4-  (chip/PHY side MDI pairs)
+#   4,5 = chip-side center taps (100nF to GND)
+#   11=VC1, 12=VC2   (line-side CT, PoE V+)
+#   13=VC3, 14=VC4   (line-side CT, PoE return)
+#   15=GRN+, 16=GRN- (green LED)
+#   17=YEL+, 18=YEL- (yellow LED)
+#   S1,S2 = shield
+# ============================================================
+# KSZ MDI pins per port, pairs 1-4:
+KSZ_PORT_MDI = {
+  1: [(1, 2),   (4, 5),   (6, 7),   (8, 9)],
+  2: [(12, 13), (15, 16), (17, 18), (20, 21)],
+  3: [(24, 25), (26, 27), (28, 29), (31, 32)],
+  4: [(34, 35), (37, 38), (39, 40), (42, 43)],
+  5: [(112, 113), (115, 116), (117, 118), (120, 121)],
+}
+# MagJack chip-side MDI pin pairs (TD1..TD4 +/-)
+MJ_P = [1, 3, 7, 9]    # TD1+, TD2+, TD3+, TD4+
+MJ_N = [2, 6, 8, 10]   # TD1-, TD2-, TD3-, TD4-
+PAIR = ['A', 'B', 'C', 'D']
+
+# KSZ LED pins per port
+KSZ_LEDS = {
+  1: (105, 106), 2: (91, 92), 3: (88, 89),
+  4: (85, 86),   5: (102, 103),
+}
+
+# PoE supply nets per port (from PSE FET section below)
+poe_vp = {p: Net(f'POE_VP_{p}') for p in range(1, 6)}
+
+for pn in range(1, 6):
+  j = Part(
+    tool=SKIDL, name='LPJG0926HENL', ref_prefix='J', dest=NETLIST,
+    footprint='connectors:LPJG0926HENL',
+    pins=[Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
+          for i in range(1, 19)]
+         + [Pin(num='S1', name='SH1', func=Pin.types.PASSIVE),
+            Pin(num='S2', name='SH2', func=Pin.types.PASSIVE)])
+  j.ref = f'J{pn + 1}'   # J2..J6
+
+  # KSZ PHY pairs -> magjack chip-side MDI
+  for idx in range(4):
+    pp, pm = KSZ_PORT_MDI[pn][idx]
+    np_ = Net(f'P{pn}_{PAIR[idx]}P')
+    nm_ = Net(f'P{pn}_{PAIR[idx]}N')
+    U1[pp] += np_; U1[pm] += nm_
+    j[MJ_P[idx]] += np_; j[MJ_N[idx]] += nm_
+
+  # Chip-side center taps (pins 4,5): 100nF to GND
+  ct1 = Net(f'P{pn}_CT1'); j[4] += ct1
+  c = cap('100nF'); c[1] += ct1; c[2] += gnd
+  ct2 = Net(f'P{pn}_CT2'); j[5] += ct2
+  c = cap('100nF'); c[1] += ct2; c[2] += gnd
+
+  # Line-side center taps: PoE Mode A
+  # VC1+VC2 (pins 11,12) -> 54V from PSE
+  # VC3+VC4 (pins 13,14) -> return (GND)
+  j[11] += poe_vp[pn]; j[12] += poe_vp[pn]
+  j[13] += gnd;        j[14] += gnd
+
+  # LEDs: KSZ LED0 -> green (pins 15,16),
+  #        KSZ LED1 -> yellow (pins 17,18)
+  # KSZ LED pins are active-low open-drain sinks.
+  # MagJack LEDs have internal limiting? No — add series R.
+  led0, led1 = KSZ_LEDS[pn]
+  grn = Net(f'P{pn}_GRN'); U1[led0] += grn
+  grn_a = Net(f'P{pn}_GRN_A')
+  r = res('150'); r[1] += vdd33; r[2] += grn_a
+  j[15] += grn_a                                 # GRN anode
+  j[16] += grn                                   # GRN cathode
+  yel = Net(f'P{pn}_YEL'); U1[led1] += yel
+  yel_a = Net(f'P{pn}_YEL_A')
+  r = res('150'); r[1] += vdd33; r[2] += yel_a
+  j[17] += yel_a                                 # YEL anode
+  j[18] += yel                                   # YEL cathode
+
+  # Shield
+  j['S1'] += gnd; j['S2'] += gnd
+
+# ============================================================
+# Port 6: KSZ RGMII (MAC) <-> H3 RGMII. Digital, no magnetics.
+# KSZ port-6 RGMII pins (DS00002392C):
+#   TXD0-3=55/54/53/52, RXD0-3=65/64/63/62,
+#   TX_CLK=48, RX_CLK=57, TX_CTL=49, RX_CTL=58
+# ============================================================
+rg_txd = [Net(f'RGMII_TXD{i}') for i in range(4)]  # KSZ->H3 RX
+rg_rxd = [Net(f'RGMII_RXD{i}') for i in range(4)]  # H3->KSZ TX
+rg_tx_clk = Net('RGMII_TX_CLK')   # KSZ TX clk -> H3 RX clk
+rg_rx_clk = Net('RGMII_RX_CLK')   # H3 TX clk -> KSZ RX clk
+rg_tx_ctl = Net('RGMII_TX_CTL')
+rg_rx_ctl = Net('RGMII_RX_CTL')
+# KSZ side
+U1[55] += rg_txd[0]; U1[54] += rg_txd[1]
+U1[53] += rg_txd[2]; U1[52] += rg_txd[3]
+U1[65] += rg_rxd[0]; U1[64] += rg_rxd[1]
+U1[63] += rg_rxd[2]; U1[62] += rg_rxd[3]
+U1[48] += rg_tx_clk; U1[57] += rg_rx_clk
+U1[49] += rg_tx_ctl; U1[58] += rg_rx_ctl
+
+# Per-port LEDs are now inside the LPJG0926HENL magjacks above.
+# KSZ LED pins wired directly to magjack LED cathodes (with
+# series resistors to 3.3V on the anode side).
+
+# ============================================================
+# PoE PSE -- 2x TPS23861 (TSSOP-28). 4 channels each.
+#   U9  -> ports 1-4, U13 -> port 5.
+# ============================================================
+def tps23861(ref_des):
+  u = Part(
+    tool=SKIDL, name='TPS23861', ref_prefix='U', dest=NETLIST,
+    footprint='Package_SO:TSSOP-28_4.4x9.7mm_P0.65mm',
+    pins=[
+      Pin(num='1',  name='VDD',    func=Pin.types.PWRIN),
+      Pin(num='2',  name='RESET',  func=Pin.types.INPUT),
+      Pin(num='3',  name='SCL',    func=Pin.types.INPUT),
+      Pin(num='4',  name='SDAI',   func=Pin.types.INPUT),
+      Pin(num='5',  name='SDAO',   func=Pin.types.OPENCOLL),
+      Pin(num='6',  name='INT',    func=Pin.types.OPENCOLL),
+      Pin(num='7',  name='DGND',   func=Pin.types.PWRIN),
+      Pin(num='8',  name='SEN3',   func=Pin.types.INPUT),
+      Pin(num='9',  name='DRAIN3', func=Pin.types.INPUT),
+      Pin(num='10', name='GATE3',  func=Pin.types.OUTPUT),
+      Pin(num='11', name='KSENSB', func=Pin.types.INPUT),
+      Pin(num='12', name='SEN4',   func=Pin.types.INPUT),
+      Pin(num='13', name='DRAIN4', func=Pin.types.INPUT),
+      Pin(num='14', name='GATE4',  func=Pin.types.OUTPUT),
+      Pin(num='15', name='SEN1',   func=Pin.types.INPUT),
+      Pin(num='16', name='DRAIN1', func=Pin.types.INPUT),
+      Pin(num='17', name='GATE1',  func=Pin.types.OUTPUT),
+      Pin(num='18', name='KSENSA', func=Pin.types.INPUT),
+      Pin(num='19', name='SEN2',   func=Pin.types.INPUT),
+      Pin(num='20', name='DRAIN2', func=Pin.types.INPUT),
+      Pin(num='21', name='GATE2',  func=Pin.types.OUTPUT),
+      Pin(num='22', name='AGND',   func=Pin.types.PWRIN),
+      Pin(num='23', name='A3',     func=Pin.types.INPUT),
+      Pin(num='24', name='SHTDWN', func=Pin.types.INPUT),
+      Pin(num='25', name='AIN',    func=Pin.types.INPUT),
+      Pin(num='26', name='AOUT',   func=Pin.types.OUTPUT),
+      Pin(num='27', name='NC',     func=Pin.types.NOCONNECT),
+      Pin(num='28', name='VPWR',   func=Pin.types.PWRIN),
+    ])
+  u.ref = ref_des
+  return u
+
+# Shared PSE I2C bus (managed by H3 TWI)
+i2c_sda = Net('PSE_I2C_SDA')
+i2c_scl = Net('PSE_I2C_SCL')
+
+def wire_pse_common(u, a3_to_gnd):
+  # PoE logic runs on the ALWAYS-ON PoE rail (vpse33), not the switched
+  # 3.3V -- so the ports stay powered through a management power-cycle.
+  u[1]  += vpse33     # VDD (always-on PoE rail)
+  u[7]  += gnd        # DGND
+  u[22] += gnd        # AGND
+  u[28] += vbus54      # VPWR
+  decouple(vpse33, gnd, 1)
+  c = cap('100nF', 'Capacitor_SMD:C_0805_2012Metric')
+  c[1] += vbus54; c[2] += gnd
+  u[2] += pse_reset   # shared active-low reset; STM asserts it to shed PoE
+  u[3] += i2c_scl; u[4] += i2c_sda; u[5] += i2c_sda
+  u[6] += Net(f'{u.ref}_INT_N')
+  u[23] += gnd if a3_to_gnd else vpse33  # address select
+  u[24] += vpse33     # SHTDWN disabled (kept high on the always-on rail)
+  u[25] += Net(f'{u.ref}_AIN')
+  u[26] += Net(f'{u.ref}_AOUT')
+
+# Per-channel FET circuit
+def wire_pse_channel(u, sen_pin, drain_pin, gate_pin, vp_net,
+                     qref):
+  gate = Net(f'{u.ref}_GATE{gate_pin}')
+  drain_s = Net(f'{u.ref}_DRAIN{drain_pin}')
+  src = Net(f'{u.ref}_SRC{sen_pin}')
+  sen = Net(f'{u.ref}_SEN{sen_pin}')
+  u[gate_pin] += gate
+  u[drain_pin] += drain_s
+  u[sen_pin] += sen
+  q = nfet(qref)
+  q[1] += gate; q[2] += vbus54; q[3] += src
+  r = res('47'); r[1] += vbus54; r[2] += drain_s
+  # 0.25 ohm sense resistor
+  _rref[0] += 1
+  r = Part(
+    tool=SKIDL, name='R', ref_prefix='R', dest=NETLIST,
+    value='0.25', footprint='Resistor_SMD:R_0805_2012Metric',
+    pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+          Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+  r.ref = f'R{_rref[0]}'
+  r[1] += src; r[2] += vp_net
+  r = res('22'); r[1] += src; r[2] += sen
+
+# U9 -> ports 1-4
+U9 = tps23861('U9')
+wire_pse_common(U9, a3_to_gnd=True)   # addr 0x20
+# channel map: (sen, drain, gate)
+U9_CH = {1: (15, 16, 17), 2: (19, 20, 21),
+         3: (8, 9, 10),   4: (12, 13, 14)}
+for port, (s, d, g) in U9_CH.items():
+  wire_pse_channel(U9, s, d, g, poe_vp[port], f'Q{port}')
+# KSENSA (ports 1,2) + KSENSB (ports 3,4) kelvin
+ksa = Net('U9_KSENSA'); U9[18] += ksa
+r = res('22'); r[1] += ksa; r[2] += gnd
+ksb = Net('U9_KSENSB'); U9[11] += ksb
+r = res('22'); r[1] += ksb; r[2] += gnd
+
+# U13 -> port 5 (other 3 channels unused)
+U13 = tps23861('U13')
+wire_pse_common(U13, a3_to_gnd=False)  # addr differs
+wire_pse_channel(U13, 15, 16, 17, poe_vp[5], 'Q5')
+ksa = Net('U13_KSENSA'); U13[18] += ksa
+r = res('22'); r[1] += ksa; r[2] += gnd
+U13[11] += Net('U13_KSENSB')
+# unused channels float
+for s, d, g in [(19, 20, 21), (8, 9, 10), (12, 13, 14)]:
+  U13[s] += Net(f'U13_SEN{s}')
+  U13[d] += Net(f'U13_DRAIN{d}')
+  U13[g] += Net(f'U13_GATE{g}')
+
+# PSE I2C pull-ups on the HOST (switched) rail: the bus only matters when
+# the T113 master is up, and this avoids back-driving the T113's dead I2C
+# pins from the always-on PoE rail during a management power-cycle.
+r = res('4.7k'); r[1] += vdd33; r[2] += i2c_sda
+r = res('4.7k'); r[1] += vdd33; r[2] += i2c_scl
+
+# ============================================================
+# Allwinner T113-S3 -- eLQFP128, SiP 128MB DDR3 (no ext DRAM).
+# Ball numbers from datasheet v1.6 sec 4.2/4.3 (T113S3_PINMAP.md).
+# ============================================================
+T113_PINS = {
+  # GPIOB
+  86: 'PB2', 85: 'PB3', 84: 'PB4', 82: 'PB5', 80: 'PB6', 79: 'PB7',
+  # GPIOC
+  19: 'PC2', 18: 'PC3', 17: 'PC4', 16: 'PC5', 15: 'PC6', 14: 'PC7',
+  # GPIOD
+  55: 'PD0', 56: 'PD1', 57: 'PD2', 58: 'PD3', 59: 'PD4', 60: 'PD5',
+  61: 'PD6', 62: 'PD7', 63: 'PD8', 64: 'PD9', 67: 'PD10',
+  68: 'PD11', 70: 'PD12', 69: 'PD13', 71: 'PD14', 72: 'PD15',
+  73: 'PD16', 74: 'PD17', 75: 'PD18', 76: 'PD19', 54: 'PD20',
+  53: 'PD21', 52: 'PD22', 65: 'VCC-LVDS', 66: 'VCC-PD',
+  # GPIOE
+  44: 'PE0', 45: 'PE1', 35: 'PE2', 33: 'PE3', 43: 'PE4', 42: 'PE5',
+  41: 'PE6', 40: 'PE7', 39: 'PE8', 38: 'PE9', 37: 'PE10',
+  36: 'PE11', 32: 'PE12', 31: 'PE13', 34: 'VCC-PE',
+  # GPIOF
+  7: 'PF0', 8: 'PF1', 9: 'PF2', 10: 'PF3', 11: 'PF4', 12: 'PF5',
+  13: 'PF6',
+  # GPIOG
+  120: 'PG0', 118: 'PG1', 119: 'PG2', 121: 'PG3', 123: 'PG4',
+  122: 'PG5', 1: 'PG6', 2: 'PG7', 3: 'PG8', 4: 'PG9', 5: 'PG10',
+  6: 'PG11', 124: 'PG12', 125: 'PG13', 126: 'PG14', 127: 'PG15',
+  128: 'VCC-PG',
+  # SDRAM
+  47: 'DZQ', 48: 'VCC-DRAM0', 49: 'VCC-DRAM1', 50: 'VDD18-DRAM',
+  # System
+  27: 'RESET',
+  # GPADC / TPADC
+  101: 'GPADC0', 102: 'TP-X1', 103: 'TP-X2', 104: 'TP-Y1',
+  105: 'TP-Y2',
+  # USB
+  114: 'USB0-DM', 115: 'USB0-DP', 113: 'USB1-DM', 112: 'USB1-DP',
+  # CVBS
+  78: 'TVOUT0', 77: 'VCC-TVOUT', 108: 'TVIN0', 109: 'TVIN1',
+  110: 'TVIN-VRP', 111: 'TVIN-VRN', 107: 'VCC-TVIN',
+  # Audio codec
+  87: 'MICIN3P', 88: 'MICIN3N', 93: 'FMINR', 94: 'FMINL',
+  95: 'LINEINR', 96: 'LINEINL', 98: 'HPOUTR', 99: 'HPOUTL',
+  100: 'HPOUTFB', 97: 'HPVCC', 92: 'VRA1', 90: 'VRA2',
+  89: 'AVCC', 91: 'AGND',
+  # RTC & PLL
+  25: 'X32KIN', 24: 'X32KOUT', 26: 'VCC-RTC', 20: 'VCC-PLL',
+  # DCXO 24MHz
+  23: 'DXIN', 22: 'DXOUT', 21: 'REFCLK-OUT',
+  # NC
+  106: 'NC0',
+  # Power
+  29: 'LDO-IN', 28: 'LDOA-OUT', 30: 'LDOB-OUT', 83: 'VCC-IO',
+  46: 'VDD-SYS0', 51: 'VDD-SYS1', 81: 'VDD-SYS2',
+  116: 'VDD-CORE0', 117: 'VDD-CORE1',
+}
+
+_T113_NAME2BALL = {v: k for k, v in T113_PINS.items()}
+
+_t113_pins = []
+for _ball, _sig in T113_PINS.items():
+  if (_sig.startswith('VCC') or _sig.startswith('VDD')
+      or _sig in ('AVCC', 'HPVCC', 'LDO-IN', 'LDOA-OUT',
+                  'LDOB-OUT', 'AGND')):
+    _func = Pin.types.PWRIN
+  elif _sig == 'NC0':
+    _func = Pin.types.NOCONNECT
+  else:
+    _func = Pin.types.BIDIR
+  _t113_pins.append(Pin(num=str(_ball), name=_sig, func=_func))
+_t113_pins.append(Pin(num='129', name='EP', func=Pin.types.PASSIVE))
+
+U7 = Part(
+  tool=SKIDL, name='T113-S3', ref_prefix='U', dest=NETLIST,
+  footprint='chips:eLQFP-128-1EP_14x14mm_P0.4mm',
+  pins=_t113_pins)
+U7.ref = 'U7'
+
+def tc(name, net):
+  """Connect the T113 pin for `name` to `net` (LHS-safe)."""
+  U7[_T113_NAME2BALL[name]] += net
+
+# --- T113 power ---
+tc('VDD-CORE0', vcore)
+tc('VDD-CORE1', vcore)
+for _n in ['VDD-SYS0', 'VDD-SYS1', 'VDD-SYS2', 'VCC-IO', 'VCC-PE',
+           'VCC-PD', 'VCC-PG', 'VCC-PLL', 'VCC-RTC']:
+  tc(_n, vdd33)
+for _n in ['VCC-DRAM0', 'VCC-DRAM1', 'VDD18-DRAM']:
+  tc(_n, vdd18)
+tc('AVCC', vdd33)          # analog 3.3 (add ferrite bead in layout)
+tc('AGND', gnd)
+U7['129'] += gnd           # exposed pad = GND (MANDATORY)
+tc('LDO-IN', vdd33)
+for _n in ['LDOA-OUT', 'LDOB-OUT']:   # internal LDO outs: bypass
+  _ldo = Net(f'T113_{_n.replace("-","_")}')
+  U7[_T113_NAME2BALL[_n]] += _ldo
+  c = cap('1uF'); c[1] += _ldo; c[2] += gnd
+# Unused analog/video supply rails -- TODO confirm against
+# datasheet 5.3 whether these may be left unpowered; named nets
+# (not grounded) so the intent is explicit, not silent.
+tc('VCC-LVDS', Net('NC_VCC_LVDS'))
+tc('HPVCC', Net('NC_HPVCC'))
+tc('VCC-TVOUT', Net('NC_VCC_TVOUT'))
+tc('VCC-TVIN', Net('NC_VCC_TVIN'))
+# DZQ DDR impedance cal: 240R to GND
+_zq = Net('T113_DZQ'); tc('DZQ', _zq)
+r = res('240'); r[1] += _zq; r[2] += gnd
+# decoupling
+decouple(vdd33, gnd, 12)
+decouple(vcore, gnd, 6)
+decouple(vdd18, gnd, 4)
+for _rail in (vcore, vdd33):
+  c = cap('10uF', 'Capacitor_SMD:C_0805_2012Metric')
+  c[1] += _rail; c[2] += gnd
+
+# --- T113 24MHz DCXO crystal (DXIN/DXOUT) ---
+Y2 = Part(
+  tool=SKIDL, name='Crystal_24MHz', ref_prefix='Y', dest=NETLIST,
+  value='24MHz',
+  footprint='Crystal:Crystal_SMD_2016-4Pin_2.0x1.6mm',
+  pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+        Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+_xin = Net('T113_DXIN'); _xout = Net('T113_DXOUT')
+tc('DXIN', _xin); tc('DXOUT', _xout)
+Y2[1] += _xin; Y2[2] += _xout
+c = cap('18pF'); c[1] += _xin;  c[2] += gnd
+c = cap('18pF'); c[1] += _xout; c[2] += gnd
+
+# --- T113 32.768kHz RTC crystal ---
+Y3 = Part(
+  tool=SKIDL, name='Crystal_32K', ref_prefix='Y', dest=NETLIST,
+  value='32.768kHz',
+  footprint='Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm',
+  pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+        Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+_x32i = Net('T113_X32KIN'); _x32o = Net('T113_X32KOUT')
+tc('X32KIN', _x32i); tc('X32KOUT', _x32o)
+Y3[1] += _x32i; Y3[2] += _x32o
+
+# --- T113 reset ---
+soc_reset = Net('SOC_RESET_N')
+tc('RESET', soc_reset)
+r = res('10k'); r[1] += vdd33; r[2] += soc_reset
+c = cap('100nF'); c[1] += soc_reset; c[2] += gnd
+
+# --- T113 RGMII (PG bank) <-> KSZ port 6 ---
+# T113 RX side (receives KSZ TX): PG1/2/8/9=RXD0-3, PG10=RXCK,
+#   PG0=RXCTL  -> KSZ TX nets (rg_txd / rg_tx_clk / rg_tx_ctl)
+tc('PG1', rg_txd[0]); tc('PG2', rg_txd[1])
+tc('PG8', rg_txd[2]); tc('PG9', rg_txd[3])
+tc('PG10', rg_tx_clk); tc('PG0', rg_tx_ctl)
+# T113 TX side (drives KSZ RX): PG4/5/6/7=TXD0-3, PG3=TXCK,
+#   PG12=TXCTL -> KSZ RX nets (rg_rxd / rg_rx_clk / rg_rx_ctl)
+tc('PG4', rg_rxd[0]); tc('PG5', rg_rxd[1])
+tc('PG6', rg_rxd[2]); tc('PG7', rg_rxd[3])
+tc('PG3', rg_rx_clk); tc('PG12', rg_rx_ctl)
+# MDC/MDIO unused for MAC-MAC link (KSZ managed over SPI);
+# CLKIN (PG13) needs a 25MHz ref -- TODO confirm clock source.
+tc('PG14', Net('RGMII_MDC'))
+tc('PG15', Net('RGMII_MDIO'))
+tc('PG13', Net('RGMII_CLKIN_25M'))
+
+# --- T113 SPI0 (PC bank) -> KSZ mgmt + boot flash ---
+tc('PC2', spi_clk)
+tc('PC4', spi_mosi)
+tc('PC5', spi_miso)
+flash_cs = Net('FLASH_CS')
+tc('PC3', flash_cs)        # SPI0-CS0 -> boot flash
+tc('PB4', spi_cs)          # KSZ chip-select (GPIO)
+tc('PB5', intrp)           # KSZ interrupt (GPIO)
+
+# --- T113 TWI0 (PB2/PB3) -> PoE I2C bus ---
+tc('PB2', i2c_sda)
+tc('PB3', i2c_scl)
+
+# --- T113 UART0 (PE2/PE3) debug console ---
+uart_tx = Net('UART_TX'); uart_rx = Net('UART_RX')
+tc('PE2', uart_tx); tc('PE3', uart_rx)
+J7 = Part(
+  tool=SKIDL, name='Conn_01x03', ref_prefix='J', dest=NETLIST,
+  footprint='Connector_PinHeader_2.54mm:'
+            'PinHeader_1x03_P2.54mm_Vertical',
+  pins=[Pin(num='1', name='TX', func=Pin.types.PASSIVE),
+        Pin(num='2', name='RX', func=Pin.types.PASSIVE),
+        Pin(num='3', name='GND', func=Pin.types.PASSIVE)])
+J7.ref = 'J7'
+J7[1] += uart_tx; J7[2] += uart_rx; J7[3] += gnd
+
+# --- T113 USB0 OTG -> USB-C (section below) ---
+usb_dp = Net('USB_DP'); usb_dm = Net('USB_DM')
+tc('USB0-DP', usb_dp); tc('USB0-DM', usb_dm)
+
+# --- T113 SDC0 (PF bank) -> micro SD card slot ---
+# Standard micro SD pinout (SD mode, 4-bit):
+#   1=DAT2, 2=DAT3/CD, 3=CMD, 4=VDD, 5=CLK,
+#   6=VSS, 7=DAT0, 8=DAT1, 9=CD(detect), 10/11=shield
+sd_clk = Net('SD_CLK')
+sd_cmd = Net('SD_CMD')
+sd_d0  = Net('SD_D0')
+sd_d1  = Net('SD_D1')
+sd_d2  = Net('SD_D2')
+sd_d3  = Net('SD_D3')
+tc('PF0', sd_d1)    # SDC0_D1
+tc('PF1', sd_d0)    # SDC0_D0
+tc('PF2', sd_clk)   # SDC0_CLK
+tc('PF3', sd_cmd)   # SDC0_CMD
+tc('PF4', sd_d3)    # SDC0_D3
+tc('PF5', sd_d2)    # SDC0_D2
+
+J_SD = Part(
+  tool=SKIDL, name='microSD', ref_prefix='J', dest=NETLIST,
+  footprint='Connector_Card:'
+            'microSD_HC_Molex_104031-0811',
+  pins=[Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
+        for i in range(1, 12)])
+J_SD.ref = 'J8'
+J_SD[1]  += sd_d2     # DAT2
+J_SD[2]  += sd_d3     # DAT3/CD
+J_SD[3]  += sd_cmd    # CMD
+J_SD[4]  += vdd33     # VDD
+J_SD[5]  += sd_clk    # CLK
+J_SD[6]  += gnd       # VSS
+J_SD[7]  += sd_d0     # DAT0
+J_SD[8]  += sd_d1     # DAT1
+J_SD[9]  += Net('SD_CD')   # card detect (optional GPIO)
+J_SD[10] += gnd       # shield
+J_SD[11] += gnd       # shield
+# ESD protection: 100nF on VDD
+decouple(vdd33, gnd, 1)
+
+# --- T113 watchdog kick GPIO (PB6) ---
+# WDI is now kicked by the STM32 supervisor (the dumb watchdog watches
+# the SUPERVISOR, not the T113). T113 PB6 is freed.
+stm_wdi = Net('STM_WDI')
+
+# ============================================================
+# W25N02 SPI NAND boot flash (256MB) -- SOIC-8
+# Shared SPI0 bus; flash CS on T113 PC3 (SPI0-CS0),
+# KSZ CS on PB4 (GPIO).
+# ============================================================
+U8 = Part(
+  tool=SKIDL, name='W25N02JWZEIF', ref_prefix='U', dest=NETLIST,
+  footprint='Package_SO:SOIC-8_3.9x4.9mm_P1.27mm',
+  pins=[
+    Pin(num='1', name='CS',   func=Pin.types.INPUT),
+    Pin(num='2', name='DO',   func=Pin.types.OUTPUT),
+    Pin(num='3', name='WP',   func=Pin.types.INPUT),
+    Pin(num='4', name='GND',  func=Pin.types.PWRIN),
+    Pin(num='5', name='DI',   func=Pin.types.INPUT),
+    Pin(num='6', name='CLK',  func=Pin.types.INPUT),
+    Pin(num='7', name='HOLD', func=Pin.types.INPUT),
+    Pin(num='8', name='VCC',  func=Pin.types.PWRIN),
+  ])
+U8.ref = 'U8'
+# flash_cs is wired to T113 SPI0-CS0 (PC3) in the T113 section.
+U8[1] += flash_cs
+U8[2] += spi_miso
+U8[4] += gnd
+U8[5] += spi_mosi
+U8[6] += spi_clk
+U8[8] += vdd33
+fw = Net('FLASH_WP'); r = res('10k'); r[1] += vdd33; r[2] += fw
+U8[3] += fw
+fh = Net('FLASH_HOLD'); r = res('10k'); r[1] += vdd33; r[2] += fh
+U8[7] += fh
+decouple(vdd33, gnd, 1)
+
+# ============================================================
+# TPS3823-33 watchdog -- SOT-23-5; RST -> H3_RESET, WDI from H3
+# ============================================================
+U10 = Part(
+  tool=SKIDL, name='TPS3823', ref_prefix='U', dest=NETLIST,
+  footprint='Package_TO_SOT_SMD:SOT-23-5',
+  pins=[
+    Pin(num='1', name='RST', func=Pin.types.OUTPUT),
+    Pin(num='2', name='GND', func=Pin.types.PWRIN),
+    Pin(num='3', name='MR',  func=Pin.types.INPUT),
+    Pin(num='4', name='VDD', func=Pin.types.PWRIN),
+    Pin(num='5', name='WDI', func=Pin.types.INPUT),
+  ])
+U10.ref = 'U10'
+# Repurposed: the dumb watchdog now watches the SUPERVISOR (STM32) and
+# runs off the STANDBY rail so it survives a main power-cycle. STM stops
+# kicking WDI -> RST (open-drain) low -> resets the STM AND cuts MAIN_EN
+# (both via isolation Schottkys in the supervisor section) = a dumb-
+# silicon power-cycle of everything, no firmware in the loop.
+stm_wd_rst = Net('STM_WD_RST')
+U10[1] += stm_wd_rst   # RST, open-drain active-low
+U10[2] += gnd
+U10[3] += v3v3_sb      # /MR unused (tied high, inactive)
+U10[4] += v3v3_sb      # VDD from standby
+U10[5] += stm_wdi      # WDI kicked by the STM32 (PB1)
+r = res('10k'); r[1] += v3v3_sb; r[2] += stm_wd_rst   # RST pull-up
+decouple(v3v3_sb, gnd, 1)
+
+# ============================================================
+# RESET button
+# ============================================================
+SW2 = Part(
+  tool=SKIDL, name='SW_Push', ref_prefix='SW', dest=NETLIST,
+  footprint='Button_Switch_SMD:SW_Push_1P1T_NO_CK_KMR2',
+  pins=[Pin(num='1', name='A', func=Pin.types.PASSIVE),
+        Pin(num='2', name='B', func=Pin.types.PASSIVE)])
+SW2.ref = 'SW2'
+SW2[1] += soc_reset
+SW2[2] += gnd
+
+# ============================================================
+# USB-C receptacle (device mode, debug/FEL)
+# ============================================================
+# Molex 2171820001 -- vertical, 16-circuit USB-C (USB2), mounted INTERNALLY
+# (debug/FEL, reach it by popping the lid). SamacSys footprint
+# (connectors:CONN_2171820001_MOL). Unlike the old GCT part, the A/B sides
+# are separate pads, so the cable-flip pairs (VBUS/GND/D+/D-) tie on-board.
+J_USB = Part(
+  tool=SKIDL, name='USB-C_2171820001', ref_prefix='J', dest=NETLIST,
+  footprint='connectors:CONN_2171820001_MOL',
+  pins=[
+    Pin(num='A1',  name='GND',  func=Pin.types.PWRIN),
+    Pin(num='A4',  name='VBUS', func=Pin.types.PWRIN),
+    Pin(num='A5',  name='CC1',  func=Pin.types.BIDIR),
+    Pin(num='A6',  name='DP1',  func=Pin.types.BIDIR),
+    Pin(num='A7',  name='DN1',  func=Pin.types.BIDIR),
+    Pin(num='A9',  name='VBUS', func=Pin.types.PWRIN),
+    Pin(num='A12', name='GND',  func=Pin.types.PWRIN),
+    Pin(num='B1',  name='GND',  func=Pin.types.PWRIN),
+    Pin(num='B4',  name='VBUS', func=Pin.types.PWRIN),
+    Pin(num='B5',  name='CC2',  func=Pin.types.BIDIR),
+    Pin(num='B6',  name='DP2',  func=Pin.types.BIDIR),
+    Pin(num='B7',  name='DN2',  func=Pin.types.BIDIR),
+    Pin(num='B9',  name='VBUS', func=Pin.types.PWRIN),
+    Pin(num='B12', name='GND',  func=Pin.types.PWRIN),
+    Pin(num='S1',  name='SHLD', func=Pin.types.PASSIVE),
+    Pin(num='S2',  name='SHLD', func=Pin.types.PASSIVE),
+    Pin(num='S3',  name='SHLD', func=Pin.types.PASSIVE),
+    Pin(num='S4',  name='SHLD', func=Pin.types.PASSIVE),
+    Pin(num='MNT2',name='MNT',  func=Pin.types.PASSIVE),
+  ])
+J_USB.ref = 'J12'
+for _p in ('A1', 'A12', 'B1', 'B12', 'S1', 'S2', 'S3', 'S4', 'MNT2'):
+  J_USB[_p] += gnd          # GND: four corners + shield tabs + mount pad
+usb_vbus = Net('USB_VBUS')
+for _p in ('A4', 'A9', 'B4', 'B9'):
+  J_USB[_p] += usb_vbus     # VBUS: all four
+usb_cdp = Net('USB_CONN_DP'); usb_cdm = Net('USB_CONN_DM')
+J_USB['A6'] += usb_cdp; J_USB['B6'] += usb_cdp   # D+ pair tied (cable flip)
+J_USB['A7'] += usb_cdm; J_USB['B7'] += usb_cdm   # D- pair tied
+r = res('27'); r[1] += usb_dp; r[2] += usb_cdp
+r = res('27'); r[1] += usb_dm; r[2] += usb_cdm
+cc1 = Net('USB_CC1'); cc2 = Net('USB_CC2')
+J_USB['A5'] += cc1; J_USB['B5'] += cc2           # CC separate (orientation)
+r = res('5.1k'); r[1] += cc1; r[2] += gnd        # device-mode Rd pulldowns
+r = res('5.1k'); r[1] += cc2; r[2] += gnd
+# SBU1/SBU2 (A8/B8) unused for USB2 -- pads left open
+
+# ============================================================
+# Power + status LEDs
+# ============================================================
+# Power LED on 3.3V
+an = Net('LED_PWR_A'); r = res('270'); d = led()
+r[1] += vdd33; r[2] += an; d[1] += an; d[2] += gnd
+# Status LED on a T113 GPIO (active low)
+stat = Net('LED_STATUS'); an = Net('LED_STA_A')
+r = res('270'); d = led()
+r[1] += vdd33; r[2] += an; d[1] += an; d[2] += stat
+tc('PB7', stat)
+# Fault/alarm LED (red) on a T113 GPIO (active low)
+fault = Net('LED_FAULT'); an = Net('LED_FAULT_A')
+r = res('270'); d = led()
+r[1] += vdd33; r[2] += an; d[1] += an; d[2] += fault
+tc('PE4', fault)
+
+# ============================================================
+# SUPERVISOR SUBSYSTEM -- always-on housekeeping MCU
+#   STM32G071 (LQFP48) on a standby 3.3V rail: watchdogs the
+#   T113 (drives SOC_RESET_N), reads 2x DS18B20 (1-Wire) + an
+#   SHT4x (I2C humidity/temp for dew-point / condensation),
+#   drives an alarm LED, and sits behind a DUMB thermal-switch
+#   failsafe that asserts SOC_RESET_N on over-temp with no
+#   firmware in the loop.  "Contain" layer of prevent+contain.
+# ============================================================
+# Standby 3.3V straight off PROTECTED 24V so the supervisor domain is
+# INDEPENDENT of the main switched rails -- it rides through a main
+# power-cycle. HV LDO (>=40V in); ~10-20mA standby => <0.4W, negligible
+# vs the board's tens of W. Finalize the exact HV-LDO part in layout.
+U18 = ldo_sot223('TPS7B6933QDCYRQ1', 'U18')
+U18[3] += vin24; U18[2] += v3v3_sb; U18[1] += gnd
+for _v, _fp in (('10uF', 'Capacitor_SMD:C_0805_2012Metric'),
+                ('100nF', 'Capacitor_SMD:C_0402_1005Metric')):
+  c = cap(_v, _fp); c[1] += v3v3_sb; c[2] += gnd
+
+# PoE-logic 3.3V -- separate always-on rail off protected 24V, INDEPENDENT
+# of MAIN_EN, so the PSE controllers hold the ports powered through a
+# management power-cycle. EN defaults on (pull-up to standby); the STM can
+# pull PSE_EN low to shed PoE -- the gentlest thermal action, dropping the
+# board's biggest heat source before it ever has to halt the SoC.
+U20 = ldo_sot223('TPS7B6933QDCYRQ1', 'U20')
+U20[3] += vin24; U20[2] += vpse33; U20[1] += gnd
+# PSE shared-reset pull-up (default high = PSEs run; STM pulls low to shed)
+r = res('10k'); r[1] += vpse33; r[2] += pse_reset
+for _v, _fp in (('10uF', 'Capacitor_SMD:C_0805_2012Metric'),
+                ('100nF', 'Capacitor_SMD:C_0402_1005Metric')):
+  c = cap(_v, _fp); c[1] += vpse33; c[2] += gnd
+
+# --- supervisor nets ---
+i2c_scl   = Net('SUP_I2C_SCL')
+i2c_sda   = Net('SUP_I2C_SDA')
+onewire   = Net('SUP_1WIRE')
+mcu_nrst  = Net('MCU_NRST')
+mcu_swdio = Net('MCU_SWDIO')
+mcu_swclk = Net('MCU_SWCLK')          # PA14 (also BOOT0)
+mcu_alarm = Net('MCU_ALARM')
+sup_t2m   = Net('SUP_T113_TO_MCU')    # T113 UART TX -> MCU RX
+sup_m2t   = Net('SUP_MCU_TO_T113')    # MCU UART TX -> T113 RX
+sup_hb    = Net('SUP_HEARTBEAT')      # T113 kicks the MCU
+
+# STM32G071CBTx (LQFP48). Pin numbers per KiCad MCU_ST_STM32G0
+# (STM32G0 LQFP48 pinout is standardized). Only the used pins
+# are declared; the balance of the 44 GPIO are free in layout.
+U19 = Part(
+  tool=SKIDL, name='STM32G071CBTx', ref_prefix='U', dest=NETLIST,
+  footprint='Package_QFP:LQFP-48_7x7mm_P0.5mm',
+  pins=[
+    Pin(num='4',  name='VBAT',  func=Pin.types.PWRIN),
+    Pin(num='5',  name='VREF+', func=Pin.types.PWRIN),
+    Pin(num='6',  name='VDD',   func=Pin.types.PWRIN),
+    Pin(num='7',  name='VSS',   func=Pin.types.PWRIN),
+    Pin(num='10', name='NRST',  func=Pin.types.INPUT),     # PF2/NRST
+    Pin(num='13', name='PA2',   func=Pin.types.OUTPUT),    # USART2_TX
+    Pin(num='14', name='PA3',   func=Pin.types.INPUT),     # USART2_RX
+    Pin(num='15', name='PA4',   func=Pin.types.OPENCOLL),  # -> SOC_RESET_N
+    Pin(num='16', name='PA5',   func=Pin.types.INPUT),     # heartbeat in
+    Pin(num='17', name='PA6',   func=Pin.types.OUTPUT),    # alarm out
+    Pin(num='19', name='PB0',   func=Pin.types.INPUT),     # reset sense
+    Pin(num='20', name='PB1',   func=Pin.types.OUTPUT),    # WDI kick -> TPS3823
+    Pin(num='21', name='PB2',   func=Pin.types.OPENCOLL),  # MAIN_EN cut (cycle)
+    Pin(num='42', name='PB3',   func=Pin.types.OPENCOLL),  # PSE reset (shed PoE)
+    Pin(num='11', name='PA0',   func=Pin.types.OUTPUT),    # fault-relay drive
+    Pin(num='12', name='PA1',   func=Pin.types.INPUT),     # DI sense (opto)
+    Pin(num='28', name='PA8',   func=Pin.types.BIDIR),     # 1-Wire DQ
+    Pin(num='35', name='PA13',  func=Pin.types.BIDIR),     # SWDIO
+    Pin(num='36', name='PA14',  func=Pin.types.BIDIR),     # SWCLK/BOOT0
+    Pin(num='45', name='PB6',   func=Pin.types.BIDIR),     # I2C1_SCL
+    Pin(num='46', name='PB7',   func=Pin.types.BIDIR),     # I2C1_SDA
+  ])
+U19.ref = 'U19'
+U19[6] += v3v3_sb; U19[4] += v3v3_sb; U19[5] += v3v3_sb; U19[7] += gnd
+U19[10] += mcu_nrst
+U19[13] += sup_m2t; U19[14] += sup_t2m
+U19[15] += soc_reset          # watchdog reset of the T113 (open-drain)
+U19[16] += sup_hb
+U19[17] += mcu_alarm
+U19[19] += soc_reset          # sense who is holding reset (thermostat/btn)
+U19[20] += stm_wdi            # kick the dumb watchdog (TPS3823)
+U19[21] += main_en            # power-cycle the main domain (open-drain)
+U19[42] += pse_reset          # shed PoE: reset the PSEs (thermal, OD)
+U19[28] += onewire
+U19[35] += mcu_swdio; U19[36] += mcu_swclk
+U19[45] += i2c_scl; U19[46] += i2c_sda
+# MCU decoupling + reset RC + BOOT0 pull-down (boot from flash)
+decouple(v3v3_sb, gnd, 3, '100nF')
+c = cap('4.7uF', 'Capacitor_SMD:C_0805_2012Metric')
+c[1] += v3v3_sb; c[2] += gnd
+r = res('10k'); r[1] += v3v3_sb; r[2] += mcu_nrst       # NRST pull-up
+c = cap('100nF'); c[1] += mcu_nrst; c[2] += gnd
+r = res('10k'); r[1] += mcu_swclk; r[2] += gnd          # BOOT0 = 0 (flash)
+
+# Dumb-watchdog trip fan-out: TPS3823 RST (STM_WD_RST) pulls BOTH the STM
+# reset and MAIN_EN low, isolated by Schottkys so NRST and MAIN_EN never
+# short. STM choke -> STM resets + whole main domain power-cycles.
+D52 = two_pin('BAT54', 'D52', 'Diode_SMD:D_SOD-323')
+D52[1] += mcu_nrst; D52[2] += stm_wd_rst    # anode->NRST, cathode->STM_WD_RST
+D53 = two_pin('BAT54', 'D53', 'Diode_SMD:D_SOD-323')
+D53[1] += main_en;  D53[2] += stm_wd_rst    # anode->MAIN_EN, cathode->STM_WD_RST
+
+# SWD programming header (2x3, 1.27mm)
+J10 = Part(
+  tool=SKIDL, name='SWD_2x3', ref_prefix='J', dest=NETLIST,
+  footprint='Connector_PinHeader_1.27mm:PinHeader_2x03_P1.27mm_Vertical',
+  pins=[Pin(num=str(_i), name=_n, func=Pin.types.PASSIVE) for _i, _n in
+        [(1, 'VDD'), (2, 'SWDIO'), (3, 'GND'),
+         (4, 'SWCLK'), (5, 'NRST'), (6, 'NC')]])
+J10.ref = 'J10'
+J10[1] += v3v3_sb; J10[2] += mcu_swdio; J10[3] += gnd
+J10[4] += mcu_swclk; J10[5] += mcu_nrst
+
+# --- T113 side of the supervisor link (spare GPIO / muxable UART) ---
+tc('PD18', sup_t2m)    # T113 UART TX -> MCU RX
+tc('PD19', sup_m2t)    # T113 UART RX <- MCU TX
+tc('PD17', sup_hb)     # T113 heartbeat -> MCU
+
+# --- T113-driven firmware patch path (field-flash the supervisor) ---
+# The T113/USART link above lands on the STM32 PA2/PA3 = USART2, which
+# IS the STM32G0 ROM system-bootloader UART. So the host reflashes the
+# supervisor in-field two ways, no ST-Link, box stays sealed:
+#   1) normal: the running app takes a new image over UART and self-
+#      flashes (or software-jumps to system memory), then reboots;
+#   2) recovery: even if the app is bricked, the T113 drives BOOT0 high
+#      and pulses NRST -> STM32 lands in the ROM bootloader on USART2
+#      and the host reflashes it with the stock ST protocol.
+# J10 (SWD) stays for factory bring-up / setting nBOOT_SEL=0.
+boot0_ctl = Net('MCU_BOOT0_CTL')
+tc('PD16', mcu_nrst)      # T113 -> STM32 NRST (open-drain reset/recover)
+tc('PD15', boot0_ctl)     # T113 -> BOOT0 select (high = ROM bootloader)
+# series into PA14/BOOT0: wins over the 10k pull-down when T113 drives
+# high, but isolates the T113 GPIO from the SWD probe's SWCLK on the bench
+r = res('1k'); r[1] += boot0_ctl; r[2] += mcu_swclk
+
+# --- 2x DS18B20 (1-Wire), one bus, probed at the SoC + KSZ hot spots
+r = res('4.7k'); r[1] += v3v3_sb; r[2] += onewire       # 1-Wire pull-up
+for _ref in ('U15', 'U16'):
+  ds = Part(
+    tool=SKIDL, name='DS18B20', ref_prefix='U', dest=NETLIST,
+    footprint='Package_TO_SOT_THT:TO-92_Inline',
+    pins=[Pin(num='1', name='GND', func=Pin.types.PWRIN),
+          Pin(num='2', name='DQ',  func=Pin.types.BIDIR),
+          Pin(num='3', name='VDD', func=Pin.types.PWRIN)])
+  ds.ref = _ref
+  ds[1] += gnd; ds[2] += onewire; ds[3] += v3v3_sb
+  c = cap('100nF'); c[1] += v3v3_sb; c[2] += gnd
+
+# --- SHT4x humidity + temp (I2C) -- dew-point / condensation watch ---
+U17 = Part(
+  tool=SKIDL, name='SHT40-AD1B', ref_prefix='U', dest=NETLIST,
+  footprint='Sensor_Humidity:Sensirion_DFN-4_1.5x1.5mm_P0.8mm_SHT4x_NoCentralPad',
+  pins=[Pin(num='1', name='SDA', func=Pin.types.BIDIR),
+        Pin(num='2', name='SCL', func=Pin.types.INPUT),
+        Pin(num='3', name='VDD', func=Pin.types.PWRIN),
+        Pin(num='4', name='VSS', func=Pin.types.PWRIN)])
+U17.ref = 'U17'
+U17[1] += i2c_sda; U17[2] += i2c_scl; U17[3] += v3v3_sb; U17[4] += gnd
+c = cap('100nF'); c[1] += v3v3_sb; c[2] += gnd
+r = res('4.7k'); r[1] += v3v3_sb; r[2] += i2c_scl       # I2C pull-ups
+r = res('4.7k'); r[1] += v3v3_sb; r[2] += i2c_sda
+
+# --- alarm LED (red), MCU_ALARM active-low ---
+an = Net('LED_ALM_A'); r = res('270'); d = led()
+r[1] += v3v3_sb; r[2] += an; d[1] += an; d[2] += mcu_alarm
+
+# --- DUMB FAILSAFE: over-temp thermal switch (closes on rise) ---
+# Shorts SOC_RESET_N low on over-temp -> holds the T113 halted
+# independent of MCU firmware. Mounted at the SoC hot spot.
+TS1 = Part(
+  tool=SKIDL, name='Thermostat_NO_95C', ref_prefix='TS', dest=NETLIST,
+  footprint='Connector_Wire:SolderWire-0.25sqmm_1x02_P4.2mm_D0.65mm_OD1.7mm',
+  pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+        Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+TS1.ref = 'TS1'
+TS1[1] += soc_reset; TS1[2] += gnd
+
+# ============================================================
+# EXTERNAL SIGNALING -- industrial fault relay OUT + digital input IN
+#   Out-of-band status to a PLC/SCADA that works when the network /
+#   management plane is down (the whole point). Driven/read by the
+#   always-on supervisor off standby; both sides galvanically isolated.
+# ============================================================
+# Fault relay K1 -- FAIL-SAFE (normally energized). The STM holds the
+# coil ON while healthy; any fault -- or a dead STM, or loss of input
+# power -- drops it, so the COM-NO loop the customer monitors BREAKS.
+# 24V coil off protected VIN, low-side N-FET, gate default-OFF (relay
+# stays de-energized until firmware declares health). Dry Form-C out.
+relay_gate = Net('RELAY_GATE')
+relay_drv  = Net('RELAY_DRV')
+# Hongfa HFD23-024-1ZS -- 24V-coil SPDT signal relay, THT (won't shake loose).
+# Custom footprint generated from datasheet (connectors:Relay_HFD23_1C_THT).
+# Pads: 1=NO 2=coil 3=COM 4=NC 5=coil 6=COM (COM doubled). VERIFY w/ meter.
+K1 = Part(tool=SKIDL, name='HFD23-024-1ZS', ref_prefix='K', dest=NETLIST,
+  footprint='connectors:Relay_HFD23_1C_THT',
+  pins=[Pin(num='1', name='NO',  func=Pin.types.PASSIVE),
+        Pin(num='2', name='A2',  func=Pin.types.PASSIVE),
+        Pin(num='3', name='COM', func=Pin.types.PASSIVE),
+        Pin(num='4', name='NC',  func=Pin.types.PASSIVE),
+        Pin(num='5', name='A1',  func=Pin.types.PASSIVE),
+        Pin(num='6', name='COM', func=Pin.types.PASSIVE)])
+K1.ref = 'K1'
+K1['5'] += vin24; K1['2'] += relay_drv        # coil (non-polar)
+D54 = two_pin('1N4148W', 'D54', 'Diode_SMD:D_SOD-123')
+D54[1] += relay_drv; D54[2] += vin24        # flyback (cathode to VIN)
+# 2N7002 low-side coil driver (SOT-23: pin1=G, pin2=S, pin3=D)
+Q60 = Part(tool=SKIDL, name='2N7002', ref_prefix='Q', dest=NETLIST,
+  footprint='Package_TO_SOT_SMD:SOT-23',
+  pins=[Pin(num='1', name='G', func=Pin.types.INPUT),
+        Pin(num='2', name='S', func=Pin.types.PASSIVE),
+        Pin(num='3', name='D', func=Pin.types.PASSIVE)])
+Q60.ref = 'Q60'
+Q60['1'] += relay_gate; Q60['3'] += relay_drv; Q60['2'] += gnd
+U19[11] += relay_gate                        # STM fault-relay drive
+r = res('100k'); r[1] += relay_gate; r[2] += gnd   # default-OFF = fail-safe
+# ONE pluggable SIGNAL block J11 (relay contact + DI), on a DIFFERENT pitch
+# than the 5.08mm power terminal -- Phoenix MC 1,5 / 3.5mm, threaded flange.
+# The plugs are not interchangeable, so 24V power can never be mis-inserted
+# into the signal connector.  1=COM 2=NO 3=NC (dry Form-C alarm) | 4=DI+
+# 5=DI- (isolated input).  Power stays on its own MSTB 5.08mm block (J1).
+J11 = Part(tool=SKIDL, name='MC1,5/5-GF-3,5_1843826', ref_prefix='J', dest=NETLIST,
+  footprint='Connector_Phoenix_MC:PhoenixContact_MC_1,5_5-GF-3.5_1x05_P3.50mm_Horizontal_ThreadedFlange',
+  pins=[Pin(num='1', name='COM', func=Pin.types.PASSIVE),
+        Pin(num='2', name='NO',  func=Pin.types.PASSIVE),
+        Pin(num='3', name='NC',  func=Pin.types.PASSIVE),
+        Pin(num='4', name='DI+', func=Pin.types.PASSIVE),
+        Pin(num='5', name='DI-', func=Pin.types.PASSIVE)])
+J11.ref = 'J11'
+relay_com = Net('RELAY_COM'); J11[1] += relay_com
+relay_no  = Net('RELAY_NO');  J11[2] += relay_no
+relay_nc  = Net('RELAY_NC');  J11[3] += relay_nc
+K1['3'] += relay_com; K1['6'] += relay_com    # COM (both far-column pads)
+K1['1'] += relay_no;  K1['4'] += relay_nc     # NO, NC
+D55 = two_pin('SMBJ33CA', 'D55', 'Diode_SMD:D_SMB')
+D55[1] += relay_com; D55[2] += relay_no       # bidir TVS COM-NO (field surge)
+
+# Digital input -- isolated 24V-sense of an external dry/PLC contact.
+# The supervisor reads it (active-low) and reports up via the T113
+# (SNMP/UI/MODBUS), even while the SoC is down. Opto-isolated, TVS'd.
+di_sense = Net('DI_SENSE')
+di_la    = Net('DI_LED_A')
+di_p = Net('DI_TERM_P'); J11[4] += di_p            # DI+ terminal
+di_n = Net('DI_TERM_N'); J11[5] += di_n            # DI- terminal
+U21 = Part(tool=SKIDL, name='EL357N', ref_prefix='U', dest=NETLIST,
+  footprint='Package_SO:SOP-4_3.8x4.1mm_P2.54mm',
+  pins=[Pin(num='1', name='A', func=Pin.types.PASSIVE),
+        Pin(num='2', name='K', func=Pin.types.PASSIVE),
+        Pin(num='3', name='E', func=Pin.types.PASSIVE),
+        Pin(num='4', name='C', func=Pin.types.PASSIVE)])
+U21.ref = 'U21'
+r = res('4.7k'); r[1] += di_p; r[2] += di_la       # 24V -> ~5mA LED current
+U21[1] += di_la;  U21[2] += di_n                   # LED: DI+ (via R) -> DI-
+D56 = two_pin('1N4148W', 'D56', 'Diode_SMD:D_SOD-123')
+D56[1] += di_n; D56[2] += di_la                    # reverse-clamp across LED
+D57 = two_pin('SMBJ33CA', 'D57', 'Diode_SMD:D_SMB')
+D57[1] += di_p; D57[2] += di_n                     # input surge TVS
+U21[3] += gnd;    U21[4] += di_sense               # emitter->GND, collector->STM
+r = res('10k'); r[1] += v3v3_sb; r[2] += di_sense  # pull-up (active-low)
+U19[12] += di_sense                                # STM reads the DI
+
+# ============================================================
+# CHASSIS GROUNDING -- 4-point PE frame bond + one GND<->PE stitch
+#   MH1-4 bond the metal frame to protective earth at all four
+#   corners (solid, low-impedance, multi-point). GND ties to PE at
+#   ONE deliberate point near J1: a 0R hard-bond link in parallel
+#   with a 1M bleed + 4.7nF Y-cap. Pick the relationship at
+#   assembly -- fit the 0R to hard-bond, or leave just the R||C to
+#   HF-couple while staying DC-isolated (kills ground loops).
+# ============================================================
+for _mh in ('MH1', 'MH2', 'MH3', 'MH4'):
+  mh = Part(tool=SKIDL, name='MountingHole_M3_PE', ref_prefix='MH',
+            dest=NETLIST, footprint='MountingHole:MountingHole_3mm_Pad',
+            pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE)])
+  mh.ref = _mh
+  mh[1] += earth        # frame -> PE, all four corners
+
+# GND <-> PE stitch (one controlled bond, tunable at assembly)
+r = res('1M'); r[1] += gnd; r[2] += earth                 # bleed / DC leak path
+c = cap('4.7nF', 'Capacitor_SMD:C_1206_3216Metric')       # HF bond (use Y-rated)
+c[1] += gnd; c[2] += earth
+r = res('0R'); r[1] += gnd; r[2] += earth                 # hard-bond link (fit/DNP)
+
+# ============================================================
+# Generate netlist
+# ============================================================
+generate_netlist(file_='netlist_s5.net')
+
+import re, hashlib, uuid
+with open('netlist_s5.net', 'r') as f:
+  content = f.read()
+counter = [0]
+def stable_replace_tstamp(m):
+  counter[0] += 1
+  h = hashlib.md5(f'tstamp_{counter[0]}'.encode()).hexdigest()
+  return f'(tstamps "{uuid.UUID(h)}")'
+counter_tag = [0]
+def stable_replace_tag(m):
+  counter_tag[0] += 1
+  return f'(name "SKiDL Tag") "tag_{counter_tag[0]}")'
+content = re.sub(r'\(tstamps "[^"]+"\)',
+                 stable_replace_tstamp, content)
+content = re.sub(r'\(name "SKiDL Tag"\) "[^"]+"\)',
+                 stable_replace_tag, content)
+with open('netlist_s5.net', 'w') as f:
+  f.write(content)
+
+print(f"Netlist generated: C1-C{_cref[0]}, R1-R{_rref[0]}, "
+      f"L1-L{_lref[0]}, Q1-Q{_qref[0]}")
+print("Timestamps stabilized.")

@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""
+s5-power: separate PoE power board for the s5 switch.
+
+Rationale: isolate all the switching (boost + buck + input front-end) onto
+its own board so it can be certified/EMC-qualified as a reusable module and
+dropped into s5 AND the f-box. Takes 24V industrial input, delivers the
+system rails to the digital board over a board-to-board interconnect.
+
+Partition:
+  THIS board (the EMC source, all the switching):
+    - 24V Phoenix input + protection (fuse, reverse-pol FET, TVS, ferrite)
+    - LM5122 boost   24V -> 54V PoE bus (VBUS_54V)
+    - TPS54560 buck  24V -> 5V           (VDD_5V)
+    - AMS1117 LDO    5V  -> 3V3          (VDD_3V3)
+  DIGITAL board makes locally (point-of-load, NOT crossed):
+    - 2.5V/1.2V (KSZ), 0.9V core + 1.8V (T113): drop-sensitive, kept at load
+    - PSE (TPS23861) + port FETs: kept next to the RJ45 magnetics
+
+Interconnect (crosses to digital board):
+    J2 (Molex Micro-Fit 3.0, 2x6, right-angle -- low profile for the 35mm box):
+       VBUS_54V x2 (7A), VIN_24V, VDD_5V, VDD_3V3, MAIN_EN, PWR_GOOD, GND x5
+      MAIN_EN : digital supervisor -> buck enable (cut the switched domain)
+      PWR_GOOD: boost power-good -> digital
+
+Circuits lifted verbatim from s5/hw/netlistscript (proven, committed) so the
+design transfers. Boost external FETs (BOOST_HO/LO/CSP/CSN) are still TODO
+here exactly as in s5 -- same open item, not a regression.
+"""
+
+from skidl import *
+
+# ============================================================
+# Stable ref counters + helpers (mirrors s5 conventions)
+# ============================================================
+_cref = [0]; _rref = [0]; _lref = [0]
+
+def cap(value, fp='Capacitor_SMD:C_0402_1005Metric'):
+  _cref[0] += 1
+  c = Part(tool=SKIDL, name='C', ref_prefix='C', dest=NETLIST,
+           value=value, footprint=fp,
+           pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+                 Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+  c.ref = f'C{_cref[0]}'; return c
+
+def res(value, fp='Resistor_SMD:R_0402_1005Metric'):
+  _rref[0] += 1
+  r = Part(tool=SKIDL, name='R', ref_prefix='R', dest=NETLIST,
+           value=value, footprint=fp,
+           pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+                 Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+  r.ref = f'R{_rref[0]}'; return r
+
+def inductor(value, fp='Inductor_SMD:L_1210_3225Metric'):
+  _lref[0] += 1
+  l = Part(tool=SKIDL, name='L', ref_prefix='L', dest=NETLIST,
+           value=value, footprint=fp,
+           pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+                 Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+  l.ref = f'L{_lref[0]}'; return l
+
+def decouple(rail, gnd, n, value='100nF',
+             fp='Capacitor_SMD:C_0402_1005Metric'):
+  for _ in range(n):
+    c = cap(value, fp); c[1] += rail; c[2] += gnd
+
+def two_pin(name, ref, fp):
+  import re as _re
+  p = Part(tool=SKIDL, name=name, ref_prefix=_re.sub(r'\d+$', '', ref),
+           dest=NETLIST, footprint=fp,
+           pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+                 Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+  p.ref = ref; return p
+
+# ============================================================
+# Nets
+# ============================================================
+gnd    = Net('GND')
+earth  = Net('EARTH')
+vin_raw   = Net('VIN_RAW')
+vin_fused = Net('VIN_FUSED')
+vin_prot  = Net('VIN_PROT')
+rp_gate   = Net('RP_GATE')
+vin24  = Net('VIN_24V')     # protected 24V input
+vbus54 = Net('VBUS_54V')    # 54V PoE bus (boost out)
+vdd5   = Net('VDD_5V')      # 5V (buck out)
+vdd33  = Net('VDD_3V3')     # 3V3 (LDO out)
+main_en  = Net('MAIN_EN')   # <- digital supervisor: buck/domain enable
+pwr_good = Net('PWR_GOOD')  # -> digital: boost power-good
+
+# ============================================================
+# 24V Phoenix input + protection  (lifted from s5 L144-224)
+#   J1(+24V) -> F1 -> Q1 reverse-pol -> TVS/MOV -> FB1 -> VIN_24V
+# ============================================================
+J1 = Part(tool=SKIDL, name='MSTB2,5/3-GF-5,08_1776511', ref_prefix='J',
+  dest=NETLIST,
+  footprint='Connector_Phoenix_MSTB:PhoenixContact_MSTB_2,5_3-GF-5,08_1x03_P5.08mm_Horizontal_ThreadedFlange',
+  pins=[Pin(num='1', name='24V', func=Pin.types.PASSIVE),
+        Pin(num='2', name='GND', func=Pin.types.PASSIVE),
+        Pin(num='3', name='PE',  func=Pin.types.PASSIVE)])
+J1.ref = 'J1'
+J1[1] += vin_raw; J1[2] += gnd; J1[3] += earth
+
+# Input draws ~7A (150W boost). s5's 2A fuse was grossly undersized (would blow
+# under normal load). ~10A time-lag; a 1206 fuse can't carry 10A -- larger part.
+F1 = two_pin('Fuse_10A_TL', 'F1', 'Fuse:Fuse_2920_7451Metric')
+F1[1] += vin_raw; F1[2] += vin_fused
+
+# Reverse-polarity P-FET. s5's BSP315P is rated only -1.17A -- burns up at 7A.
+# Need a power P-ch: >=40V, >=15A, low Rds_on, power SO-8. *** SELECT REAL PART ***
+# (pinout below assumes PowerPAK SO-8: 1-3=S, 4=G, 5-8=D)
+Q1 = Part(tool=SKIDL, name='PFET_40V_SELECT', ref_prefix='Q', dest=NETLIST,
+  value='P-ch 40V >=15A low-Rds (SELECT)',
+  footprint='Package_SO:PowerPAK_SO-8_Single',
+  pins=[Pin(num='1', name='S', func=Pin.types.PASSIVE),
+        Pin(num='2', name='S', func=Pin.types.PASSIVE),
+        Pin(num='3', name='S', func=Pin.types.PASSIVE),
+        Pin(num='4', name='G', func=Pin.types.INPUT),
+        Pin(num='5', name='D', func=Pin.types.PASSIVE),
+        Pin(num='6', name='D', func=Pin.types.PASSIVE),
+        Pin(num='7', name='D', func=Pin.types.PASSIVE),
+        Pin(num='8', name='D', func=Pin.types.PASSIVE)])
+Q1.ref = 'Q1'
+# High-side P-FET reverse-polarity: Source=LOAD, Drain=INPUT so the body diode
+# (P-ch: anode=Drain) conducts input->load normally and BLOCKS on reverse.
+# (s5 had S/D swapped -> body diode passed reverse voltage to the load = broken.)
+for p in (1, 2, 3): Q1[p] += vin_prot     # source -> load
+for p in (5, 6, 7, 8): Q1[p] += vin_fused # drain  -> input
+Q1[4] += rp_gate
+r = res('100k'); r[1] += rp_gate; r[2] += gnd            # gate pulldown (P-ch on)
+# Vgs clamp zener. SOT-23 BZX84: pin1=Anode, pin2=NC, pin3=Cathode (datasheet).
+# s5 wired pins 1+2 -> cathode(3) floating = clamp was OPEN CIRCUIT. Fixed:
+# cathode(3)->source(VIN_PROT), anode(1)->gate, so it clamps Vgs at ~12V.
+D2 = Part(tool=SKIDL, name='BZX84C12', ref_prefix='D', dest=NETLIST,
+  value='BZX84C12', footprint='Package_TO_SOT_SMD:SOT-23',
+  pins=[Pin(num='1', name='A', func=Pin.types.PASSIVE),
+        Pin(num='2', name='NC', func=Pin.types.NOCONNECT),
+        Pin(num='3', name='K', func=Pin.types.PASSIVE)])
+D2.ref = 'D2'
+D2[1] += rp_gate; D2[3] += vin_prot
+
+# TVS: SMBJ33A (not SMBJ30A) -- 33V standoff gives 18% margin over 28V max input
+# while clamp (53.3V) stays under the LM5122 60V abs-max. 30A was too marginal.
+D1 = two_pin('SMBJ33A', 'D1', 'Diode_SMD:D_SMB')
+D1[1] += vin_prot; D1[2] += gnd
+RV1 = two_pin('MOV_S14K30_DNP', 'RV1', 'Varistor:RV_Disc_D9mm_W3.9mm_P5mm')
+RV1[1] += vin_prot; RV1[2] += gnd
+
+# Input filter inductor. s5's BLM31 ferrite is rated 1.5A -- in the 7A path it
+# saturates (no filtering) AND dissipates ~3.9W -> burns. Replaced with a
+# high-current power inductor (~2.2uH, Isat>=12A, DCR<=10mR). *** SELECT PART;
+# a common-mode choke may also be needed for conducted-EMI cert ***
+FB1 = Part(tool=SKIDL, name='L_2u2_12A', ref_prefix='L', dest=NETLIST,
+  value='2.2uH Isat>=12A (SELECT)', footprint='Inductor_SMD:L_Bourns_SRP1245A',
+  pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
+        Pin(num='2', name='2', func=Pin.types.PASSIVE)])
+FB1.ref = 'FB1'
+FB1[1] += vin_prot; FB1[2] += vin24
+for _n in (vin_prot, vin24):
+  c = cap('10uF', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += _n; c[2] += gnd
+c = cap('100uF', 'Capacitor_SMD:C_1206_3216Metric'); c[1] += vin24; c[2] += gnd
+
+# ============================================================
+# LM5122 synchronous boost -- 24V -> 54V
+# PINOUT + PACKAGE VERIFIED vs datasheet SNVS954H. The original s5 symbol was
+# a hallucinated pinout (phantom DEMB/ILIM/EN/PG pins, real SYNCOUT/OPT/SLOPE/
+# MODE/RES missing, everything on wrong numbers) AND wrong package (QFN vs the
+# real HTSSOP-20 PWP). Fully corrected below.
+#   1=SYNCOUT 2=OPT 3=CSN 4=CSP 5=VIN 6=UVLO 7=SS 8=SYNCIN/RT 9=AGND 10=FB
+#   11=COMP 12=SLOPE 13=MODE 14=RES 15=PGND 16=LO 17=VCC 18=SW 19=HO 20=BST 21=EP
+# ============================================================
+U1 = Part(tool=SKIDL, name='LM5122', ref_prefix='U', dest=NETLIST,
+  footprint='Package_SO:HTSSOP-20-1EP_4.4x6.5mm_P0.65mm_EP3.4x6.5mm_ThermalVias',
+  pins=[Pin(num=str(n), name=nm, func=Pin.types.PASSIVE) for n, nm in [
+    (1,'SYNCOUT'),(2,'OPT'),(3,'CSN'),(4,'CSP'),(5,'VIN'),(6,'UVLO'),(7,'SS'),
+    (8,'SYNCIN_RT'),(9,'AGND'),(10,'FB'),(11,'COMP'),(12,'SLOPE'),(13,'MODE'),
+    (14,'RES'),(15,'PGND'),(16,'LO'),(17,'VCC'),(18,'SW'),(19,'HO'),(20,'BST'),
+    (21,'EP')]])
+U1.ref = 'U1'
+# grounds + supplies
+U1[9] += gnd; U1[15] += gnd; U1[21] += gnd     # AGND, PGND, EP
+U1[5] += vin24                                 # VIN (controller supply)
+decouple(vin24, gnd, 1, '1uF', 'Capacitor_SMD:C_0603_1608Metric')
+boost_vcc = Net('BOOST_VCC'); U1[17] += boost_vcc
+decouple(boost_vcc, gnd, 1, '4.7uF', 'Capacitor_SMD:C_0805_2012Metric')
+# 1 SYNCOUT: float (single-phase). 2 OPT: must NOT float -- set per datasheet
+# OPT table. Placeholder ties to VCC. *** VERIFY OPT standalone level before fab ***
+U1[2] += boost_vcc
+# 6 UVLO = enable (no separate EN pin): turn-on ~18.85V via 100k/6.8k
+uvlo_net = Net('BOOST_UVLO'); U1[6] += uvlo_net
+r = res('100k'); r[1] += vin24; r[2] += uvlo_net
+r = res('6.8k'); r[1] += uvlo_net; r[2] += gnd
+# 7 SS soft-start
+boost_ss = Net('BOOST_SS'); c = cap('100nF'); c[1] += boost_ss; c[2] += gnd
+U1[7] += boost_ss
+# 8 SYNCIN/RT: 45.3k -> 200kHz (Eq.4)
+boost_rt = Net('BOOST_RT'); r = res('45.3k'); r[1] += boost_rt; r[2] += gnd
+U1[8] += boost_rt
+# 10 FB: 440k/10k -> 54.0V (1.2V ref)
+boost_fb = Net('BOOST_FB'); U1[10] += boost_fb
+r = res('440k'); r[1] += vbus54; r[2] += boost_fb
+r = res('10k'); r[1] += boost_fb; r[2] += gnd
+# 11 COMP network
+boost_comp = Net('BOOST_COMP'); U1[11] += boost_comp
+r = res('10k'); r[1] += boost_comp
+bc_mid = Net('BOOST_COMP_MID'); r[2] += bc_mid
+c = cap('10nF'); c[1] += bc_mid; c[2] += gnd
+# 12 SLOPE: slope-comp resistor to AGND (~40.2k @200kHz). This is what the bogus
+# s5 "33k ILIM" was meant to be -- there is NO ILIM pin; current limit = RS only.
+boost_slope = Net('BOOST_SLOPE'); r = res('40.2k'); r[1] += boost_slope; r[2] += gnd
+U1[12] += boost_slope
+# 13 MODE high (>1.2V) = forced PWM/CCM at full load. 14 RES to AGND = no hiccup.
+U1[13] += boost_vcc; U1[14] += gnd
+
+# ---- Power stage (VIN -> RS -> L -> SW; QL to PGND, QH sync-rect to VBUS) ----
+boost_sw = Net('BOOST_SW'); U1[18] += boost_sw
+l_in = Net('L_IN')
+# Sense resistor RS 5mohm 2W: CSP=VIN side, CSN=inductor side (Ipeak_CL 15.4A)
+RS = two_pin('R_5m_2W', 'RS', 'Resistor_SMD:R_2512_6332Metric')
+RS[1] += vin24; RS[2] += l_in
+csp_net = Net('BOOST_CSP'); csn_net = Net('BOOST_CSN')
+r = res('100R'); r[1] += vin24; r[2] += csp_net; U1[4] += csp_net
+r = res('100R'); r[1] += l_in;  r[2] += csn_net; U1[3] += csn_net
+c = cap('100pF'); c[1] += csp_net; c[2] += csn_net
+# Boost inductor 22uH (Bourns SRP1245A, Isat>=15A, confirm value/DCR on order)
+l = inductor('22uH', 'Inductor_SMD:L_Bourns_SRP1245A')
+l[1] += l_in; l[2] += boost_sw
+# Power FETs: 2x Infineon BSC057N08NS3G (80V 5.7mohm). *** verify PowerPAK land
+# pins (1-3=S,4=G,5-8=D) match the exact BSC057N08NS3G package before fab ***
+def nfet_pso8(ref):
+  q = Part(tool=SKIDL, name='BSC057N08NS3G', ref_prefix='Q', dest=NETLIST,
+    value='BSC057N08NS3G', footprint='Package_SO:PowerPAK_SO-8_Single',
+    pins=[Pin(num='1', name='S', func=Pin.types.PASSIVE),
+          Pin(num='2', name='S', func=Pin.types.PASSIVE),
+          Pin(num='3', name='S', func=Pin.types.PASSIVE),
+          Pin(num='4', name='G', func=Pin.types.INPUT),
+          Pin(num='5', name='D', func=Pin.types.PASSIVE),
+          Pin(num='6', name='D', func=Pin.types.PASSIVE),
+          Pin(num='7', name='D', func=Pin.types.PASSIVE),
+          Pin(num='8', name='D', func=Pin.types.PASSIVE)])
+  q.ref = ref; return q
+QL = nfet_pso8('Q2')                              # low-side main switch
+for p in (1,2,3): QL[p] += gnd                    # source -> PGND
+for p in (5,6,7,8): QL[p] += boost_sw             # drain  -> SW
+lo_g = Net('BOOST_LO'); r = res('2.2R'); r[1] += lo_g; r[2] += QL[4]; U1[16] += lo_g
+QH = nfet_pso8('Q3')                              # high-side sync rectifier
+for p in (1,2,3): QH[p] += boost_sw               # source -> SW
+for p in (5,6,7,8): QH[p] += vbus54               # drain  -> VOUT
+ho_g = Net('BOOST_HO'); r = res('2.2R'); r[1] += ho_g; r[2] += QH[4]; U1[19] += ho_g
+# Bootstrap: DBST VCC->BST (cathode=BST), CBST BST->SW
+bst_net = Net('BST_BOOST'); U1[20] += bst_net
+DBST = two_pin('PMEG10010', 'D4', 'Diode_SMD:D_SOD-323')   # 100V Schottky
+DBST[1] += bst_net; DBST[2] += boost_vcc
+c = cap('100nF'); c[1] += bst_net; c[2] += boost_sw
+# Cap VOLTAGE RATINGS (MLCC derate ~2x DC working -- lose ~50% C at rated V):
+#   54V VBUS -> 100V   |   24V VIN -> 63V min (survive ~48V TVS clamp)
+#   5V -> 16V          |   VCC/bootstrap -> 16-25V
+# Output caps on 54V rail: 100V rated.
+for _ in range(3):
+  c = cap('10uF/100V', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vbus54; c[2] += gnd
+for _ in range(2):
+  c = cap('22uF/63V', 'Capacitor_SMD:C_1206_3216Metric'); c[1] += vin24; c[2] += gnd
+# PWR_GOOD: LM5122 has NO power-good pin (the s5 "100k pull-up on PG" was
+# actually on the HO gate driver -- removed). *** TODO: PWR_GOOD needs a real
+# source -- add a voltage supervisor (e.g. TPS3808) on VBUS/VDD5. Interconnect
+# pin stays but is currently undriven. ***
+
+# ============================================================
+# TPS54560 buck -- 24V -> 5V  (lifted from s5 L328-396)
+# EN = MAIN_EN (from digital supervisor via interconnect) + UVLO divider
+# ============================================================
+U2 = Part(tool=SKIDL, name='TPS54560', ref_prefix='U', dest=NETLIST,
+  footprint='Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.29x3mm',
+  pins=[Pin(num=str(n), name=nm, func=Pin.types.PASSIVE) for n, nm in [
+    (1,'BOOT'),(2,'VIN'),(3,'EN'),(4,'RT_CLK'),(5,'VSENSE'),
+    (6,'COMP'),(7,'GND'),(8,'PH'),(9,'EP')]])
+U2.ref = 'U2'
+sw_node = Net('SW_NODE')
+U2[2] += vin24; U2[7] += gnd; U2[9] += gnd
+U2[3] += main_en
+r = res('100k'); r[1] += vin24;   r[2] += main_en
+r = res('13k');  r[1] += main_en; r[2] += gnd
+U2[8] += sw_node
+c = cap('100nF'); c[1] += Net('BOOT'); c[2] += sw_node; U2[1] += c[1]
+# Pin 4 is RT/CLK (freq set), NOT soft-start -- TPS54560 soft-start is internal.
+# The s5 design had a bogus SS cap here and NO freq resistor. 100k -> ~500kHz
+# (verify exact freq vs datasheet RT eq/Fig 6-7).
+r = res('100k'); r[1] += Net('RT_CLK'); r[2] += gnd; U2[4] += r[1]
+comp_net = Net('COMP'); U2[6] += comp_net
+r = res('24.9k'); r[1] += comp_net
+comp_mid = Net('COMP_MID'); r[2] += comp_mid
+c = cap('15nF'); c[1] += comp_mid; c[2] += gnd
+for _ in range(2):
+  c = cap('2.2uF', 'Capacitor_SMD:C_1206_3216Metric'); c[1] += vin24; c[2] += gnd
+# Buck catch diode: SS56 (60V), not SS54 (40V) -- 40V is too thin vs 24-28V
+# input + switch-node ringing. Same SMC footprint. (SMA->SMC for the 60V part.)
+D3 = Part(tool=SKIDL, name='SS56', ref_prefix='D', dest=NETLIST, value='SS56',
+  footprint='Diode_SMD:D_SMC',
+  pins=[Pin(num='1', name='K', func=Pin.types.PASSIVE),
+        Pin(num='2', name='A', func=Pin.types.PASSIVE)])
+D3.ref = 'D3'; D3[1] += sw_node; D3[2] += gnd
+# Buck output inductor 33uH -- value is fine, but MUST be a shielded power
+# inductor with Isat >= 6.5A (> the TPS54560 current limit), not a chip part.
+# (Coilcraft MSS1260-333 / Wurth WE-PD 33uH class.) *** SELECT PART ***
+l = inductor('33uH', 'Inductor_SMD:L_Bourns_SRR1210A')
+l[1] += sw_node; l[2] += vdd5
+for _ in range(2):
+  c = cap('22uF', 'Capacitor_SMD:C_0805_2012Metric'); c[1] += vdd5; c[2] += gnd
+fb_net = Net('FB_5V'); U2[5] += fb_net
+r = res('52.3k'); r[1] += vdd5; r[2] += fb_net
+r = res('10k'); r[1] += fb_net; r[2] += gnd
+
+# ============================================================
+# AMS1117-3.3 LDO -- 5V -> 3V3  (lifted from s5 L429-431)
+# ============================================================
+U3 = Part(tool=SKIDL, name='AMS1117-3.3', ref_prefix='U', dest=NETLIST,
+  footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
+  pins=[Pin(num='1', name='GND', func=Pin.types.PWRIN),
+        Pin(num='2', name='VO',  func=Pin.types.PWROUT),
+        Pin(num='3', name='VI',  func=Pin.types.PWRIN)])
+U3.ref = 'U3'
+U3[3] += vdd5; U3[2] += vdd33; U3[1] += gnd
+decouple(vdd33, gnd, 1, '10uF', 'Capacitor_SMD:C_0805_2012Metric')
+
+# ============================================================
+# J2 -- board-to-board interconnect (Molex Micro-Fit 3.0, 2x6, RIGHT-ANGLE)
+# One connector carries power + signal (low profile for the 35mm box).
+# Micro-Fit ~8.5A/circuit; VBUS 7A on 2 parallel pins. Power pins paired
+# with adjacent GND returns for tight high-current loops.
+#   1=VBUS_54V 2=GND   3=VBUS_54V 4=GND   5=VIN_24V 6=GND
+#   7=VDD_5V   8=GND   9=VDD_3V3  10=GND  11=MAIN_EN 12=PWR_GOOD
+# ============================================================
+J2 = Part(tool=SKIDL, name='Conn_02x06', ref_prefix='J', dest=NETLIST,
+  footprint='Connector_Molex:Molex_Micro-Fit_3.0_43045-1200_2x06_P3.00mm_Horizontal',
+  pins=[Pin(num=str(n), name=str(n), func=Pin.types.PASSIVE) for n in range(1, 13)])
+J2.ref = 'J2'
+J2[1] += vbus54; J2[2] += gnd; J2[3] += vbus54; J2[4] += gnd
+J2[5] += vin24;  J2[6] += gnd; J2[7] += vdd5;   J2[8] += gnd
+J2[9] += vdd33;  J2[10] += gnd; J2[11] += main_en; J2[12] += pwr_good
+
+# ============================================================
+# Generate netlist
+# ============================================================
+generate_netlist(file_='netlist_s5power.net')
+
+import re, hashlib, uuid
+with open('netlist_s5power.net', 'r') as f:
+  content = f.read()
+counter = [0]
+def stable_tstamp(m):
+  counter[0] += 1
+  h = hashlib.md5(f'tstamp_{counter[0]}'.encode()).hexdigest()
+  return f'(tstamps "{uuid.UUID(h)}")'
+content = re.sub(r'\(tstamps "[^"]+"\)', stable_tstamp, content)
+with open('netlist_s5power.net', 'w') as f:
+  f.write(content)
+
+print(f"s5-power netlist: C1-C{_cref[0]}, R1-R{_rref[0]}, L1-L{_lref[0]}, "
+      f"U1(boost) U2(buck) U3(3v3), J1(input) J2(Micro-Fit 2x6 interconnect)")

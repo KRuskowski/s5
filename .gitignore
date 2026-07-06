@@ -11,3 +11,19 @@ hw/.history/
 hw/_autosave-*
 hw/~*.lck
 build-arm/
+
+# SKiDL generated artifacts (netlist is regenerated from netlistscript)
+hw/*/netlist_*.net
+hw/*/*.erc
+hw/*/*.log
+hw/*/*_sklib.py
+hw/*/skidl_REPL.*
+hw/*/_autosave*
+hw/*/fp-info-cache
+# enclosure generated STEP exports (build123d/kicad-cli output)
+enclosure/*.step
+enclosure/board-*.step
+
+# editor local history
+.history/
+hw/*/.history/
