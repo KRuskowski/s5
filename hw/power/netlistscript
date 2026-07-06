@@ -19,9 +19,9 @@ Partition:
 
 Interconnect (crosses to digital board):
     J2 (Molex Micro-Fit 3.0, 2x6, right-angle -- low profile for the 35mm box):
-       VBUS_54V x2 (7A), VIN_24V, VDD_5V, VDD_3V3, MAIN_EN, PWR_GOOD, GND x5
+       VBUS_54V x2 (7A), VIN_24V, VDD_5V, VDD_3V3, MAIN_EN, GND x6
       MAIN_EN : digital supervisor -> buck enable (cut the switched domain)
-      PWR_GOOD: boost power-good -> digital
+      (no PWR_GOOD: digital senses VDD_5V/VBUS directly + owns the supervisor)
 
 Circuits lifted verbatim from s5/hw/netlistscript (proven, committed) so the
 design transfers. Boost external FETs (BOOST_HO/LO/CSP/CSN) are still TODO
@@ -86,7 +86,6 @@ vbus54 = Net('VBUS_54V')    # 54V PoE bus (boost out)
 vdd5   = Net('VDD_5V')      # 5V (buck out)
 vdd33  = Net('VDD_3V3')     # 3V3 (LDO out)
 main_en  = Net('MAIN_EN')   # <- digital supervisor: buck/domain enable
-pwr_good = Net('PWR_GOOD')  # -> digital: boost power-good
 
 # ============================================================
 # 24V Phoenix input + protection  (lifted from s5 L144-224)
@@ -101,17 +100,16 @@ J1 = Part(tool=SKIDL, name='MSTB2,5/3-GF-5,08_1776511', ref_prefix='J',
 J1.ref = 'J1'
 J1[1] += vin_raw; J1[2] += gnd; J1[3] += earth
 
-# Input draws ~7A (150W boost). s5's 2A fuse was grossly undersized (would blow
-# under normal load). ~10A time-lag; a 1206 fuse can't carry 10A -- larger part.
-F1 = two_pin('Fuse_10A_TL', 'F1', 'Fuse:Fuse_2920_7451Metric')
+# Input ~7A. Littelfuse 0452012.MRL Nano2 Slo-Blo 12A (75Vdc), 2410 pkg -- 7A is
+# 58% of rating (no nuisance-blow, clears hard faults). (Verify LCSC stock.)
+F1 = two_pin('Fuse_12A_TL_0452012', 'F1', 'Fuse:Fuse_Littelfuse-NANO2-451_453')
 F1[1] += vin_raw; F1[2] += vin_fused
 
-# Reverse-polarity P-FET. s5's BSP315P is rated only -1.17A -- burns up at 7A.
-# Need a power P-ch: >=40V, >=15A, low Rds_on, power SO-8. *** SELECT REAL PART ***
-# (pinout below assumes PowerPAK SO-8: 1-3=S, 4=G, 5-8=D)
-Q1 = Part(tool=SKIDL, name='PFET_40V_SELECT', ref_prefix='Q', dest=NETLIST,
-  value='P-ch 40V >=15A low-Rds (SELECT)',
-  footprint='Package_SO:PowerPAK_SO-8_Single',
+# Reverse-polarity P-FET: Vishay SQJ409EP (P, 40V, 60A, Rds 7mR@-10V, Vgs +-20V).
+# PowerPAK SO-8L. LCSC C727776, AEC-Q101. Loss at 7A ~0.34W. (pins 1-3=S,4=G,5-8=D)
+Q1 = Part(tool=SKIDL, name='SQJ409EP', ref_prefix='Q', dest=NETLIST,
+  value='SQJ409EP P-ch 40V 7mR (LCSC C727776)',
+  footprint='Package_SO:PowerPAK_SO-8L_Single',
   pins=[Pin(num='1', name='S', func=Pin.types.PASSIVE),
         Pin(num='2', name='S', func=Pin.types.PASSIVE),
         Pin(num='3', name='S', func=Pin.types.PASSIVE),
@@ -150,8 +148,9 @@ RV1[1] += vin_prot; RV1[2] += gnd
 # saturates (no filtering) AND dissipates ~3.9W -> burns. Replaced with a
 # high-current power inductor (~2.2uH, Isat>=12A, DCR<=10mR). *** SELECT PART;
 # a common-mode choke may also be needed for conducted-EMI cert ***
-FB1 = Part(tool=SKIDL, name='L_2u2_12A', ref_prefix='L', dest=NETLIST,
-  value='2.2uH Isat>=12A (SELECT)', footprint='Inductor_SMD:L_Bourns_SRP1245A',
+FB1 = Part(tool=SKIDL, name='XAL1010-222MED', ref_prefix='L', dest=NETLIST,
+  value='2.2uH XAL1010-222MED Isat34A DCR2.8mR (LCSC C5125746)',
+  footprint='Inductor_SMD:L_Coilcraft_XAL1010-XXX',
   pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE),
         Pin(num='2', name='2', func=Pin.types.PASSIVE)])
 FB1.ref = 'FB1'
@@ -183,9 +182,10 @@ U1[5] += vin24                                 # VIN (controller supply)
 decouple(vin24, gnd, 1, '1uF', 'Capacitor_SMD:C_0603_1608Metric')
 boost_vcc = Net('BOOST_VCC'); U1[17] += boost_vcc
 decouple(boost_vcc, gnd, 1, '4.7uF', 'Capacitor_SMD:C_0805_2012Metric')
-# 1 SYNCOUT: float (single-phase). 2 OPT: must NOT float -- set per datasheet
-# OPT table. Placeholder ties to VCC. *** VERIFY OPT standalone level before fab ***
-U1[2] += boost_vcc
+# 1 SYNCOUT: float. 2 OPT -> AGND = Master1 (standalone, free-running from RT),
+# per SNVS954H Table 1 / Fig 32. (VCC = Master2 needs an external clock -> would
+# NOT oscillate standalone. This was the placeholder bug.)
+U1[2] += gnd
 # 6 UVLO = enable (no separate EN pin): turn-on ~18.85V via 100k/6.8k
 uvlo_net = Net('BOOST_UVLO'); U1[6] += uvlo_net
 r = res('100k'); r[1] += vin24; r[2] += uvlo_net
@@ -242,14 +242,16 @@ def nfet_pso8(ref):
 QL = nfet_pso8('Q2')                              # low-side main switch
 for p in (1,2,3): QL[p] += gnd                    # source -> PGND
 for p in (5,6,7,8): QL[p] += boost_sw             # drain  -> SW
-lo_g = Net('BOOST_LO'); r = res('2.2R'); r[1] += lo_g; r[2] += QL[4]; U1[16] += lo_g
+lo_g = Net('BOOST_LO'); ql_gate = Net('QL_GATE')
+r = res('2.2R'); r[1] += lo_g; r[2] += ql_gate; QL[4] += ql_gate; U1[16] += lo_g
 QH = nfet_pso8('Q3')                              # high-side sync rectifier
 for p in (1,2,3): QH[p] += boost_sw               # source -> SW
 for p in (5,6,7,8): QH[p] += vbus54               # drain  -> VOUT
-ho_g = Net('BOOST_HO'); r = res('2.2R'); r[1] += ho_g; r[2] += QH[4]; U1[19] += ho_g
+ho_g = Net('BOOST_HO'); qh_gate = Net('QH_GATE')
+r = res('2.2R'); r[1] += ho_g; r[2] += qh_gate; QH[4] += qh_gate; U1[19] += ho_g
 # Bootstrap: DBST VCC->BST (cathode=BST), CBST BST->SW
 bst_net = Net('BST_BOOST'); U1[20] += bst_net
-DBST = two_pin('PMEG10010', 'D4', 'Diode_SMD:D_SOD-323')   # 100V Schottky
+DBST = two_pin('PMEG10010ELR-QX', 'D4', 'Diode_SMD:D_SOD-123F')  # 100V Schottky LCSC C5361358
 DBST[1] += bst_net; DBST[2] += boost_vcc
 c = cap('100nF'); c[1] += bst_net; c[2] += boost_sw
 # Cap VOLTAGE RATINGS (MLCC derate ~2x DC working -- lose ~50% C at rated V):
@@ -260,10 +262,8 @@ for _ in range(3):
   c = cap('10uF/100V', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vbus54; c[2] += gnd
 for _ in range(2):
   c = cap('22uF/63V', 'Capacitor_SMD:C_1206_3216Metric'); c[1] += vin24; c[2] += gnd
-# PWR_GOOD: LM5122 has NO power-good pin (the s5 "100k pull-up on PG" was
-# actually on the HO gate driver -- removed). *** TODO: PWR_GOOD needs a real
-# source -- add a voltage supervisor (e.g. TPS3808) on VBUS/VDD5. Interconnect
-# pin stays but is currently undriven. ***
+# (PWR_GOOD dropped: the LM5122 has no PG pin and the digital board senses the
+# rails it receives directly, so no power-good signal is generated here.)
 
 # ============================================================
 # TPS54560 buck -- 24V -> 5V  (lifted from s5 L328-396)
@@ -302,7 +302,7 @@ D3.ref = 'D3'; D3[1] += sw_node; D3[2] += gnd
 # Buck output inductor 33uH -- value is fine, but MUST be a shielded power
 # inductor with Isat >= 6.5A (> the TPS54560 current limit), not a chip part.
 # (Coilcraft MSS1260-333 / Wurth WE-PD 33uH class.) *** SELECT PART ***
-l = inductor('33uH', 'Inductor_SMD:L_Bourns_SRR1210A')
+l = inductor('33uH', 'Inductor_SMD:L_Coilcraft_XAL1510-333')  # Isat16.7A LCSC C3911775
 l[1] += sw_node; l[2] += vdd5
 for _ in range(2):
   c = cap('22uF', 'Capacitor_SMD:C_0805_2012Metric'); c[1] += vdd5; c[2] += gnd
@@ -328,7 +328,7 @@ decouple(vdd33, gnd, 1, '10uF', 'Capacitor_SMD:C_0805_2012Metric')
 # Micro-Fit ~8.5A/circuit; VBUS 7A on 2 parallel pins. Power pins paired
 # with adjacent GND returns for tight high-current loops.
 #   1=VBUS_54V 2=GND   3=VBUS_54V 4=GND   5=VIN_24V 6=GND
-#   7=VDD_5V   8=GND   9=VDD_3V3  10=GND  11=MAIN_EN 12=PWR_GOOD
+#   7=VDD_5V   8=GND   9=VDD_3V3  10=GND  11=MAIN_EN 12=GND
 # ============================================================
 J2 = Part(tool=SKIDL, name='Conn_02x06', ref_prefix='J', dest=NETLIST,
   footprint='Connector_Molex:Molex_Micro-Fit_3.0_43045-1200_2x06_P3.00mm_Horizontal',
@@ -336,7 +336,7 @@ J2 = Part(tool=SKIDL, name='Conn_02x06', ref_prefix='J', dest=NETLIST,
 J2.ref = 'J2'
 J2[1] += vbus54; J2[2] += gnd; J2[3] += vbus54; J2[4] += gnd
 J2[5] += vin24;  J2[6] += gnd; J2[7] += vdd5;   J2[8] += gnd
-J2[9] += vdd33;  J2[10] += gnd; J2[11] += main_en; J2[12] += pwr_good
+J2[9] += vdd33;  J2[10] += gnd; J2[11] += main_en; J2[12] += gnd
 
 # ============================================================
 # Generate netlist
