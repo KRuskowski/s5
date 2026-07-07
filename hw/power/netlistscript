@@ -103,7 +103,7 @@ J1[1] += vin_raw; J1[2] += gnd; J1[3] += earth
 
 # Input ~7A. Littelfuse 0452012.MRL Nano2 Slo-Blo 12A (75Vdc), 2410 pkg -- 7A is
 # 58% of rating (no nuisance-blow, clears hard faults). (Verify LCSC stock.)
-F1 = two_pin('Fuse_12A_TL_0452012', 'F1', 'Fuse:Fuse_Littelfuse-NANO2-451_453')
+F1 = two_pin('Fuse_12A_TL_0452012', 'F1', 'power:Fuse_Littelfuse-NANO2-451_453')
 F1[1] += vin_raw; F1[2] += vin_fused
 
 # Reverse-polarity P-FET: Vishay SQJ409EP (P, 40V, 60A, Rds 7mR@-10V, Vgs +-20V).
@@ -112,7 +112,7 @@ F1[1] += vin_raw; F1[2] += vin_fused
 # 5-8 -- the physical SO-8 D pins 5-8 all land on that one tab pad.)
 Q1 = Part(tool=SKIDL, name='SQJ409EP', ref_prefix='Q', dest=NETLIST,
   value='SQJ409EP P-ch 40V 7mR (LCSC C727776)',
-  footprint='Package_SO:PowerPAK_SO-8L_Single',
+  footprint='power:PowerPAK_SO-8L_Single',
   pins=[Pin(num='1', name='S', func=Pin.types.PASSIVE),
         Pin(num='2', name='S', func=Pin.types.PASSIVE),
         Pin(num='3', name='S', func=Pin.types.PASSIVE),
@@ -223,14 +223,14 @@ r = res('100R'); r[1] += vin24; r[2] += csp_net; U1[4] += csp_net
 r = res('100R'); r[1] += l_in;  r[2] += csn_net; U1[3] += csn_net
 c = cap('100pF'); c[1] += csp_net; c[2] += csn_net
 # Boost inductor 22uH (Bourns SRP1245A, Isat>=15A, confirm value/DCR on order)
-l = inductor('22uH', 'Inductor_SMD:L_Bourns_SRP1245A')
+l = inductor('22uH', 'power:L_Bourns_SRP1245A')
 l[1] += l_in; l[2] += boost_sw
 # Power FETs: 2x Infineon BSC057N08NS3G (80V 5.7mohm), PG-TDSON-8.
 # Pads 1-3=S, 4=G, 5=D. (KiCad models the SO-8 drain tab as the single pad 5;
 # the physical D pins 5-8 all land on that one tab pad.)
 def nfet_pso8(ref):
   q = Part(tool=SKIDL, name='BSC057N08NS3G', ref_prefix='Q', dest=NETLIST,
-    value='BSC057N08NS3G', footprint='Package_SO:PowerPAK_SO-8_Single',
+    value='BSC057N08NS3G', footprint='power:PowerPAK_SO-8_Single',
     pins=[Pin(num='1', name='S', func=Pin.types.PASSIVE),
           Pin(num='2', name='S', func=Pin.types.PASSIVE),
           Pin(num='3', name='S', func=Pin.types.PASSIVE),
