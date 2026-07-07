@@ -18,8 +18,9 @@ Partition:
     - PSE (TPS23861) + port FETs: kept next to the RJ45 magnetics
 
 Interconnect (crosses to digital board):
-    J2 (Molex Micro-Fit 3.0, 2x6, right-angle -- low profile for the 35mm box):
-       VBUS_54V x2 (7A), VIN_24V, VDD_5V, VDD_3V3, MAIN_EN, GND x6
+    J2 (8-way solder field; mate = Mini-Fit Versa 16AWG/9A cable, receptacle
+        into the core board's Mini-Fit Jr 2x4 right-angle header):
+       VBUS_54V x2 (3.5A/pin), VIN_24V, VDD_5V, VDD_3V3, MAIN_EN, GND x2
       MAIN_EN : digital supervisor -> buck enable (cut the switched domain)
       (no PWR_GOOD: digital senses VDD_5V/VBUS directly + owns the supervisor)
 
@@ -76,7 +77,7 @@ def two_pin(name, ref, fp):
 # Nets
 # ============================================================
 gnd    = Net('GND')
-earth  = Net('EARTH')
+earth  = Net('PE')          # protective earth (input plug pin 3 -> chassis)
 vin_raw   = Net('VIN_RAW')
 vin_fused = Net('VIN_FUSED')
 vin_prot  = Net('VIN_PROT')
@@ -106,7 +107,9 @@ F1 = two_pin('Fuse_12A_TL_0452012', 'F1', 'Fuse:Fuse_Littelfuse-NANO2-451_453')
 F1[1] += vin_raw; F1[2] += vin_fused
 
 # Reverse-polarity P-FET: Vishay SQJ409EP (P, 40V, 60A, Rds 7mR@-10V, Vgs +-20V).
-# PowerPAK SO-8L. LCSC C727776, AEC-Q101. Loss at 7A ~0.34W. (pins 1-3=S,4=G,5-8=D)
+# PowerPAK SO-8L. LCSC C727776, AEC-Q101. Loss at 7A ~0.34W.
+# Pads 1-3=S, 4=G, 5=D. (KiCad models the drain tab as the single pad 5, not
+# 5-8 -- the physical SO-8 D pins 5-8 all land on that one tab pad.)
 Q1 = Part(tool=SKIDL, name='SQJ409EP', ref_prefix='Q', dest=NETLIST,
   value='SQJ409EP P-ch 40V 7mR (LCSC C727776)',
   footprint='Package_SO:PowerPAK_SO-8L_Single',
@@ -114,16 +117,13 @@ Q1 = Part(tool=SKIDL, name='SQJ409EP', ref_prefix='Q', dest=NETLIST,
         Pin(num='2', name='S', func=Pin.types.PASSIVE),
         Pin(num='3', name='S', func=Pin.types.PASSIVE),
         Pin(num='4', name='G', func=Pin.types.INPUT),
-        Pin(num='5', name='D', func=Pin.types.PASSIVE),
-        Pin(num='6', name='D', func=Pin.types.PASSIVE),
-        Pin(num='7', name='D', func=Pin.types.PASSIVE),
-        Pin(num='8', name='D', func=Pin.types.PASSIVE)])
+        Pin(num='5', name='D', func=Pin.types.PASSIVE)])
 Q1.ref = 'Q1'
 # High-side P-FET reverse-polarity: Source=LOAD, Drain=INPUT so the body diode
 # (P-ch: anode=Drain) conducts input->load normally and BLOCKS on reverse.
 # (s5 had S/D swapped -> body diode passed reverse voltage to the load = broken.)
 for p in (1, 2, 3): Q1[p] += vin_prot     # source -> load
-for p in (5, 6, 7, 8): Q1[p] += vin_fused # drain  -> input
+Q1[5] += vin_fused                        # drain (tab) -> input
 Q1[4] += rp_gate
 r = res('100k'); r[1] += rp_gate; r[2] += gnd            # gate pulldown (P-ch on)
 # Vgs clamp zener. SOT-23 BZX84: pin1=Anode, pin2=NC, pin3=Cathode (datasheet).
@@ -225,8 +225,9 @@ c = cap('100pF'); c[1] += csp_net; c[2] += csn_net
 # Boost inductor 22uH (Bourns SRP1245A, Isat>=15A, confirm value/DCR on order)
 l = inductor('22uH', 'Inductor_SMD:L_Bourns_SRP1245A')
 l[1] += l_in; l[2] += boost_sw
-# Power FETs: 2x Infineon BSC057N08NS3G (80V 5.7mohm). *** verify PowerPAK land
-# pins (1-3=S,4=G,5-8=D) match the exact BSC057N08NS3G package before fab ***
+# Power FETs: 2x Infineon BSC057N08NS3G (80V 5.7mohm), PG-TDSON-8.
+# Pads 1-3=S, 4=G, 5=D. (KiCad models the SO-8 drain tab as the single pad 5;
+# the physical D pins 5-8 all land on that one tab pad.)
 def nfet_pso8(ref):
   q = Part(tool=SKIDL, name='BSC057N08NS3G', ref_prefix='Q', dest=NETLIST,
     value='BSC057N08NS3G', footprint='Package_SO:PowerPAK_SO-8_Single',
@@ -234,19 +235,16 @@ def nfet_pso8(ref):
           Pin(num='2', name='S', func=Pin.types.PASSIVE),
           Pin(num='3', name='S', func=Pin.types.PASSIVE),
           Pin(num='4', name='G', func=Pin.types.INPUT),
-          Pin(num='5', name='D', func=Pin.types.PASSIVE),
-          Pin(num='6', name='D', func=Pin.types.PASSIVE),
-          Pin(num='7', name='D', func=Pin.types.PASSIVE),
-          Pin(num='8', name='D', func=Pin.types.PASSIVE)])
+          Pin(num='5', name='D', func=Pin.types.PASSIVE)])
   q.ref = ref; return q
 QL = nfet_pso8('Q2')                              # low-side main switch
 for p in (1,2,3): QL[p] += gnd                    # source -> PGND
-for p in (5,6,7,8): QL[p] += boost_sw             # drain  -> SW
+QL[5] += boost_sw                                 # drain (tab) -> SW
 lo_g = Net('BOOST_LO'); ql_gate = Net('QL_GATE')
 r = res('2.2R'); r[1] += lo_g; r[2] += ql_gate; QL[4] += ql_gate; U1[16] += lo_g
 QH = nfet_pso8('Q3')                              # high-side sync rectifier
 for p in (1,2,3): QH[p] += boost_sw               # source -> SW
-for p in (5,6,7,8): QH[p] += vbus54               # drain  -> VOUT
+QH[5] += vbus54                                   # drain (tab) -> VOUT
 ho_g = Net('BOOST_HO'); qh_gate = Net('QH_GATE')
 r = res('2.2R'); r[1] += ho_g; r[2] += qh_gate; QH[4] += qh_gate; U1[19] += ho_g
 # Bootstrap: DBST VCC->BST (cathode=BST), CBST BST->SW
@@ -323,20 +321,35 @@ U3[3] += vdd5; U3[2] += vdd33; U3[1] += gnd
 decouple(vdd33, gnd, 1, '10uF', 'Capacitor_SMD:C_0805_2012Metric')
 
 # ============================================================
-# J2 -- board-to-board interconnect (Molex Micro-Fit 3.0, 2x6, RIGHT-ANGLE)
-# One connector carries power + signal (low profile for the 35mm box).
-# Micro-Fit ~8.5A/circuit; VBUS 7A on 2 parallel pins. Power pins paired
-# with adjacent GND returns for tight high-current loops.
-#   1=VBUS_54V 2=GND   3=VBUS_54V 4=GND   5=VIN_24V 6=GND
-#   7=VDD_5V   8=GND   9=VDD_3V3  10=GND  11=MAIN_EN 12=GND
+# J2 -- board-to-board power interconnect. SOLDER FIELD, no connector: 8
+# labeled THROUGH-HOLES (1.7mm, 16AWG), solder the cable wires straight in.
+# Custom footprint power:PowerCable_8way_SolderField -- no connector body, no
+# board-lock pegs. Pad numbering matches the Mini-Fit Jr 2x4 header on the core
+# (rows 1-4 top / 5-8 bottom) so each stripped wire lands on its matching net.
+# The cable's connector end plugs into the core board's Mini-Fit Jr 2x4
+# right-angle header (5569-08A1). Strain relief (cable clamp) lives HERE.
+#   1=VBUS 2=VBUS 3=VIN_24V 4=VDD_3V3 / 5=GND 6=GND 7=VDD_5V 8=MAIN_EN
 # ============================================================
-J2 = Part(tool=SKIDL, name='Conn_02x06', ref_prefix='J', dest=NETLIST,
-  footprint='Connector_Molex:Molex_Micro-Fit_3.0_43045-1200_2x06_P3.00mm_Horizontal',
-  pins=[Pin(num=str(n), name=str(n), func=Pin.types.PASSIVE) for n in range(1, 13)])
+J2 = Part(tool=SKIDL, name='PowerCable_8way', ref_prefix='J', dest=NETLIST,
+  footprint='power:PowerCable_8way_SolderField',
+  pins=[Pin(num=str(n), name=str(n), func=Pin.types.PASSIVE) for n in range(1, 9)])
 J2.ref = 'J2'
-J2[1] += vbus54; J2[2] += gnd; J2[3] += vbus54; J2[4] += gnd
-J2[5] += vin24;  J2[6] += gnd; J2[7] += vdd5;   J2[8] += gnd
-J2[9] += vdd33;  J2[10] += gnd; J2[11] += main_en; J2[12] += gnd
+J2[1] += vbus54; J2[2] += vbus54; J2[3] += vin24; J2[4] += vdd33
+J2[5] += gnd;    J2[6] += gnd;    J2[7] += vdd5;  J2[8] += main_en
+
+# ============================================================
+# Mounting holes -- M3, bond the metal frame to PE. This is how the input
+# earth (Phoenix J1 pin 3 -> PE) reaches the chassis. NO GND<->PE bond on
+# this board: the single controlled GND<->PE stitch lives on the core board
+# (near the I/O), so PE bridges the two boards via the enclosure without a
+# ground loop. The interconnect carries GND only, no PE pin.
+# ============================================================
+for _mh in ('MH1', 'MH2', 'MH3', 'MH4'):
+  mh = Part(tool=SKIDL, name='MountingHole_M3_PE', ref_prefix='MH',
+            dest=NETLIST, footprint='MountingHole:MountingHole_3mm_Pad',
+            pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE)])
+  mh.ref = _mh
+  mh[1] += earth        # frame -> PE (input earth -> chassis)
 
 # ============================================================
 # Generate netlist
@@ -356,4 +369,4 @@ with open('netlist_s5power.net', 'w') as f:
   f.write(content)
 
 print(f"s5-power netlist: C1-C{_cref[0]}, R1-R{_rref[0]}, L1-L{_lref[0]}, "
-      f"U1(boost) U2(buck) U3(3v3), J1(input) J2(Micro-Fit 2x6 interconnect)")
+      f"U1(boost) U2(buck) U3(3v3), J1(input) J2(8-way solder field), MH1-4(PE)")

@@ -88,13 +88,15 @@ def inductor(value, fp='Inductor_SMD:L_1210_3225Metric'):
   l.ref = f'L{_lref[0]}'
   return l
 
-def led():
-  """0603 LED: pin 1=A(anode), pin 2=K(cathode)."""
+def led(value='LED'):
+  """Status LED -- Osram Mini TOPLED Lx M676 (under the 1278.1004 light
+  guide). pin 1=A(anode), pin 2=K(cathode). `value` = colour order code
+  (red/orange/yellow/green all Vf~2V, fine on the shared 270R)."""
   _ledref[0] += 1
   d = Part(
     tool=SKIDL, name='LED', ref_prefix='D',
-    dest=NETLIST,
-    footprint='LED_SMD:LED_0603_1608Metric',
+    dest=NETLIST, value=value,
+    footprint='connectors:Osram_MiniTOPLED_LSM676',
     pins=[
       Pin(num='1', name='A', func=Pin.types.PASSIVE),
       Pin(num='2', name='K', func=Pin.types.PASSIVE),
@@ -144,27 +146,28 @@ vpse33 = Net('VDD_3V3_PSE')  # PoE housekeeping 3.3V -- always on (rides cycle)
 pse_reset = Net('PSE_RESET_N') # STM pulls low = reset PSEs = shed PoE (thermal)
 
 # ============================================================
-# Board-to-board POWER INTERCONNECT -- Molex Micro-Fit 3.0 2x6
-# All switching (24V input protection, LM5122 54V boost, TPS54560
-# 5V buck, 3V3 LDO) lives on the s5-power board now. The core board
-# receives finished rails here and drives MAIN_EN back to gate the
-# buck. Mates 1:1 via a straight cable to power-board J2, so the
-# pinout MUST match power-board J2 exactly:
-#   1=VBUS_54V 2=GND   3=VBUS_54V 4=GND   5=VIN_24V 6=GND
-#   7=VDD_5V   8=GND   9=VDD_3V3  10=GND  11=MAIN_EN 12=GND
-# VBUS on 2 parallel pins (Micro-Fit ~8.5A/circuit, 7A PoE).
-# VIN_24V = protected 24V for the always-on standby LDOs (U18/U20)
-# + fault relay K1. GND on 6 pins for return + interleaving.
+# Board-to-board POWER INTERCONNECT -- core end is the SERVICEABLE side:
+# POPULATE the Molex Mini-Fit Jr 2x4 RIGHT-ANGLE header here (5569-08A1),
+# so the plug + cable exit off the board edge (low profile for the 35mm box).
+# The mate is an off-the-shelf Mini-Fit Versa 8-ckt cable assembly: receptacle
+# on this end (latched, so the core board unplugs for service), 16AWG/9A wire,
+# stripped-and-tinned far end soldered permanently into the POWER board field
+# (J2). All switching (input protection, LM5122 boost, TPS54560 buck, 3V3 LDO)
+# lives on the power board; the core receives finished rails here + drives
+# MAIN_EN back to gate the buck.
+# Mini-Fit 4.2mm is 9A/circuit w/ 16AWG -- VBUS 3.5A/pin, GND 4.4A/pin (loose).
+# 8-ckt map (rows 1-4 top / 5-8 bottom, col-paired VBUS/GND). Matches power J2.
+#   1=VBUS 2=VBUS 3=VIN_24V 4=VDD_3V3 / 5=GND 6=GND 7=VDD_5V 8=MAIN_EN
+# VIN_24V = protected 24V for the always-on standby LDOs (U18/U20) + relay K1.
 # ============================================================
-J9 = Part(tool=SKIDL, name='Conn_02x06', ref_prefix='J', dest=NETLIST,
+J9 = Part(tool=SKIDL, name='Conn_02x04', ref_prefix='J', dest=NETLIST,
   footprint='Connector_Molex:'
-            'Molex_Micro-Fit_3.0_43045-1200_2x06_P3.00mm_Horizontal',
-  pins=[Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
-        for i in range(1, 13)])
+            'Molex_Mini-Fit_Jr_5569-08A1_2x04_P4.20mm_Horizontal',
+  pins=[Pin(num=str(i), name=str(i), func=Pin.types.PASSIVE)
+        for i in range(1, 9)])
 J9.ref = 'J9'
-J9[1] += vbus54; J9[2] += gnd;  J9[3] += vbus54;   J9[4]  += gnd
-J9[5] += vin24;  J9[6] += gnd;  J9[7] += vdd5;     J9[8]  += gnd
-J9[9] += vdd33;  J9[10] += gnd; J9[11] += main_en; J9[12] += gnd
+J9[1] += vbus54; J9[2] += vbus54; J9[3] += vin24; J9[4] += vdd33
+J9[5] += gnd;    J9[6] += gnd;    J9[7] += vdd5;  J9[8] += main_en
 # VBUS-54V entry bulk (>=100V rated -- MUST NOT drop to a 0805/50V part)
 c = cap('10uF', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vbus54; c[2] += gnd
 # (vin24/vdd5/vdd33 entry bulk is added by the per-rail loop below.)
@@ -834,7 +837,7 @@ J_SD = Part(
   footprint='Connector_Card:'
             'microSD_HC_Molex_104031-0811',
   pins=[Pin(num=str(i), name=f'P{i}', func=Pin.types.PASSIVE)
-        for i in range(1, 12)])
+        for i in range(1, 11)])
 J_SD.ref = 'J8'
 J_SD[1]  += sd_d2     # DAT2
 J_SD[2]  += sd_d3     # DAT3/CD
@@ -845,8 +848,9 @@ J_SD[6]  += gnd       # VSS
 J_SD[7]  += sd_d0     # DAT0
 J_SD[8]  += sd_d1     # DAT1
 J_SD[9]  += Net('SD_CD')   # card detect (optional GPIO)
-J_SD[10] += gnd       # shield
-J_SD[11] += gnd       # shield
+J_SD[10] += gnd       # shield tab
+# NOTE: KiCad 10's microSD footprint renamed the other shield pad 11 -> "SH".
+# Ground it in pcbnew (assign GND to pad SH), or tell me and I'll add num='SH'.
 # ESD protection: 100nF on VDD
 decouple(vdd33, gnd, 1)
 
@@ -976,21 +980,42 @@ r = res('5.1k'); r[1] += cc2; r[2] += gnd
 # SBU1/SBU2 (A8/B8) unused for USB2 -- pads left open
 
 # ============================================================
-# Power + status LEDs
+# Status LED strip (Mentor 1278.1004) -- ALL 4 owned by the STM32
+# supervisor on TIM3 (one timer, 4 channels -> phase-locked breathing).
+# Anodes on the ALWAYS-ON standby rail (v3v3_sb) so the supervisor can fade
+# the whole strip in from power-on and run status/fault patterns even while
+# the T113 is still booting or hung. Cathodes sink into the STM32 PWM pins
+# (active-low). 270R sets ~5mA peak; PWM duty sets brightness.
+#   D3 power/PA7(CH2)  D4 status/PB4(CH3)  D5 fault/PB5(CH4)  D6 alarm/PA6(CH1)
+# T113 PB7/PE4 (old status/fault GPIOs) are freed; the T113 now asks the
+# supervisor for status/fault over the existing UART link (USART2 sup_m2t/t2m).
 # ============================================================
-# Power LED on 3.3V
-an = Net('LED_PWR_A'); r = res('270'); d = led()
-r[1] += vdd33; r[2] += an; d[1] += an; d[2] += gnd
-# Status LED on a T113 GPIO (active low)
-stat = Net('LED_STATUS'); an = Net('LED_STA_A')
-r = res('270'); d = led()
-r[1] += vdd33; r[2] += an; d[1] += an; d[2] += stat
-tc('PB7', stat)
-# Fault/alarm LED (red) on a T113 GPIO (active low)
-fault = Net('LED_FAULT'); an = Net('LED_FAULT_A')
-r = res('270'); d = led()
-r[1] += vdd33; r[2] += an; d[1] += an; d[2] += fault
-tc('PE4', fault)
+# Power LED -- GREEN
+led_pwr = Net('LED_PWR'); an = Net('LED_PWR_A'); r = res('270'); d = led('LG M676 green')
+r[1] += v3v3_sb; r[2] += an; d[1] += an; d[2] += led_pwr
+# Status LED -- YELLOW
+stat = Net('LED_STATUS'); an = Net('LED_STA_A'); r = res('270'); d = led('LY M676 yellow')
+r[1] += v3v3_sb; r[2] += an; d[1] += an; d[2] += stat
+# Fault LED -- ORANGE
+fault = Net('LED_FAULT'); an = Net('LED_FAULT_A'); r = res('270'); d = led('LO M676 orange')
+r[1] += v3v3_sb; r[2] += an; d[1] += an; d[2] += fault
+
+# ============================================================
+# LED bargraph light guide -- Mentor 1278.1004 (4-way horizontal).
+# ONE guide covers the 4 status LEDs D3-D6 as a 2.54mm strip; the integrated
+# screen isolates the windows so the 4 colours don't bleed. LEDs are Osram
+# Mini TOPLED Lx M676 (datasheet-recommended). Mechanical part, no net;
+# press-in 2x Ø1.5 NPTH lugs @7.62mm. Footprint built from datasheet ll14-36
+# (connectors:Mentor_1278.1004_LightGuide); drop the 3D model STEP in
+# vendor-3d/Mentor_1278.1004.step.
+# LAYOUT: place D3,D4,D5,D6 in a 2.54mm row (X pitch) and LP1 concentric
+# over them -- the guide's 4 window marks sit on the LED centres.
+#   window1->D3 power   window2->D4 status   window3->D5 fault   window4->D6 alarm
+# ============================================================
+LP1 = Part(tool=SKIDL, name='1278.1004', ref_prefix='LP', dest=NETLIST,
+  value='Mentor 1278.1004 4-way bargraph light guide',
+  footprint='connectors:Mentor_1278.1004_LightGuide')
+LP1.ref = 'LP1'
 
 # ============================================================
 # SUPERVISOR SUBSYSTEM -- always-on housekeeping MCU
@@ -1052,7 +1077,10 @@ U19 = Part(
     Pin(num='14', name='PA3',   func=Pin.types.INPUT),     # USART2_RX
     Pin(num='15', name='PA4',   func=Pin.types.OPENCOLL),  # -> SOC_RESET_N
     Pin(num='16', name='PA5',   func=Pin.types.INPUT),     # heartbeat in
-    Pin(num='17', name='PA6',   func=Pin.types.OUTPUT),    # alarm out
+    Pin(num='17', name='PA6',   func=Pin.types.OUTPUT),    # TIM3_CH1 -> ALARM LED
+    Pin(num='18', name='PA7',   func=Pin.types.OUTPUT),    # TIM3_CH2 -> POWER LED
+    Pin(num='40', name='PB4',   func=Pin.types.OUTPUT),    # TIM3_CH3 -> STATUS LED
+    Pin(num='41', name='PB5',   func=Pin.types.OUTPUT),    # TIM3_CH4 -> FAULT LED
     Pin(num='19', name='PB0',   func=Pin.types.INPUT),     # reset sense
     Pin(num='20', name='PB1',   func=Pin.types.OUTPUT),    # WDI kick -> TPS3823
     Pin(num='21', name='PB2',   func=Pin.types.OPENCOLL),  # MAIN_EN cut (cycle)
@@ -1079,6 +1107,10 @@ U19[42] += pse_reset          # shed PoE: reset the PSEs (thermal, OD)
 U19[28] += onewire
 U19[35] += mcu_swdio; U19[36] += mcu_swclk
 U19[45] += i2c_scl; U19[46] += i2c_sda
+# LED panel: TIM3 PWM sinks (PA6=CH1 alarm already on mcu_alarm above)
+U19[18] += led_pwr    # PA7 TIM3_CH2 -> power LED (D3)
+U19[40] += stat       # PB4 TIM3_CH3 -> status LED (D4)
+U19[41] += fault      # PB5 TIM3_CH4 -> fault LED (D5)
 # MCU decoupling + reset RC + BOOT0 pull-down (boot from flash)
 decouple(v3v3_sb, gnd, 3, '100nF')
 c = cap('4.7uF', 'Capacitor_SMD:C_0805_2012Metric')
@@ -1155,8 +1187,8 @@ c = cap('100nF'); c[1] += v3v3_sb; c[2] += gnd
 r = res('4.7k'); r[1] += v3v3_sb; r[2] += i2c_scl       # I2C pull-ups
 r = res('4.7k'); r[1] += v3v3_sb; r[2] += i2c_sda
 
-# --- alarm LED (red), MCU_ALARM active-low ---
-an = Net('LED_ALM_A'); r = res('270'); d = led()
+# --- alarm LED, MCU_ALARM active-low -- RED ---
+an = Net('LED_ALM_A'); r = res('270'); d = led('LS M676 red')
 r[1] += v3v3_sb; r[2] += an; d[1] += an; d[2] += mcu_alarm
 
 # --- DUMB FAILSAFE: over-temp thermal switch (closes on rise) ---
