@@ -32,7 +32,7 @@
   (pad None np_thru_hole circle (at -3.81 3.8) (size 1.5 1.5) (drill 1.5) (layers *.Cu *.Mask))
   (pad None np_thru_hole circle (at 3.81 3.8) (size 1.5 1.5) (drill 1.5) (layers *.Cu *.Mask))
   (model "${KIPRJMOD}/vendor-3d/Mentor_1278.1004.step"
-    (offset (xyz -4.7 0 0))
+    (offset (xyz 0 0 0))
     (scale (xyz 1 1 1))
     (rotate (xyz 0 0 0)))
 )

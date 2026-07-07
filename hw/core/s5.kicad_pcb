@@ -5662,7 +5662,7 @@
 		(embedded_fonts no)
 		(model "${KIPRJMOD}/vendor-3d/Mentor_1278.1004.step"
 			(offset
-				(xyz -4.7 0 0)
+				(xyz 0 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
