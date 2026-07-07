@@ -345,8 +345,8 @@ J2[5] += gnd;    J2[6] += gnd;    J2[7] += vdd5;  J2[8] += main_en
 # ground loop. The interconnect carries GND only, no PE pin.
 # ============================================================
 for _mh in ('MH1', 'MH2', 'MH3', 'MH4'):
-  mh = Part(tool=SKIDL, name='MountingHole_M3_PE', ref_prefix='MH',
-            dest=NETLIST, footprint='MountingHole:MountingHole_3mm_Pad',
+  mh = Part(tool=SKIDL, name='MountingHole_M2.5_PE', ref_prefix='MH',
+            dest=NETLIST, footprint='power:MountingHole_2.7mm_M2.5_6mmPad',
             pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE)])
   mh.ref = _mh
   mh[1] += earth        # frame -> PE (input earth -> chassis)

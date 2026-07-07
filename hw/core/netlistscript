@@ -1295,8 +1295,8 @@ U19[12] += di_sense                                # STM reads the DI
 #   HF-couple while staying DC-isolated (kills ground loops).
 # ============================================================
 for _mh in ('MH1', 'MH2', 'MH3', 'MH4'):
-  mh = Part(tool=SKIDL, name='MountingHole_M3_PE', ref_prefix='MH',
-            dest=NETLIST, footprint='MountingHole:MountingHole_3mm_Pad',
+  mh = Part(tool=SKIDL, name='MountingHole_M2.5_PE', ref_prefix='MH',
+            dest=NETLIST, footprint='connectors:MountingHole_2.7mm_M2.5_6mmPad',
             pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE)])
   mh.ref = _mh
   mh[1] += earth        # frame -> PE, all four corners
