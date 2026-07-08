@@ -78,5 +78,5 @@
   (fp_line (start 15.09 13.93) (end 15.09 11.43) (layer F.Fab) (width 0.1))
 
   (model "${KIPRJMOD}/vendor-3d/MPS-06-01-RA.step"
-    (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))
+    (offset (xyz 0 6.8 8.0)) (scale (xyz 1 1 1)) (rotate (xyz 90 0 0)))
 )
