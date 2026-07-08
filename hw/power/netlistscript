@@ -18,9 +18,10 @@ Partition:
     - PSE (TPS23861) + port FETs: kept next to the RJ45 magnetics
 
 Interconnect (crosses to digital board):
-    J2 (8-way solder field; mate = Mini-Fit Versa 16AWG/9A cable, receptacle
-        into the core board's Mini-Fit Jr 2x4 right-angle header):
-       VBUS_54V x2 (3.5A/pin), VIN_24V, VDD_5V, VDD_3V3, MAIN_EN, GND x2
+    J2 (Samtec PowerStrip MPS-06 socket, right-angle, COPLANAR edge-to-edge
+        mate to the core board's MPT-06 terminal -- NO cable; socket here =
+        recessed contacts on the energized source side, no exposed live blades):
+       VBUS_54V, GND, VIN_24V, VDD_5V, VDD_3V3, MAIN_EN (6 pos, 20A+/blade)
       MAIN_EN : digital supervisor -> buck enable (cut the switched domain)
       (no PWR_GOOD: digital senses VDD_5V/VBUS directly + owns the supervisor)
 
@@ -321,21 +322,24 @@ U3[3] += vdd5; U3[2] += vdd33; U3[1] += gnd
 decouple(vdd33, gnd, 1, '10uF', 'Capacitor_SMD:C_0805_2012Metric')
 
 # ============================================================
-# J2 -- board-to-board power interconnect. SOLDER FIELD, no connector: 8
-# labeled THROUGH-HOLES (1.7mm, 16AWG), solder the cable wires straight in.
-# Custom footprint power:PowerCable_8way_SolderField -- no connector body, no
-# board-lock pegs. Pad numbering matches the Mini-Fit Jr 2x4 header on the core
-# (rows 1-4 top / 5-8 bottom) so each stripped wire lands on its matching net.
-# The cable's connector end plugs into the core board's Mini-Fit Jr 2x4
-# right-angle header (5569-08A1). Strain relief (cable clamp) lives HERE.
-#   1=VBUS 2=VBUS 3=VIN_24V 4=VDD_3V3 / 5=GND 6=GND 7=VDD_5V 8=MAIN_EN
+# J2 -- board-to-board power interconnect. Samtec PowerStrip MPS-06 SOCKET
+# (female, recessed) right-angle, COPLANAR edge-to-edge mate to the core
+# board's MPT-06 terminal -- NO cable. Socket goes on THIS board because it
+# is the energized source (24V in, VBUS out): recessed contacts mean no
+# exposed live blades when unmated. 6 positions x 6 THT pins each (36 holes),
+# pads named <pos>_<pin> (01_1..06_6). MPS position N mates MPT blade N.
+#   pos -> net: 1=VBUS_54V 2=GND 3=VIN_24V 4=VDD_5V 5=VDD_3V3 6=MAIN_EN
 # ============================================================
-J2 = Part(tool=SKIDL, name='PowerCable_8way', ref_prefix='J', dest=NETLIST,
-  footprint='power:PowerCable_8way_SolderField',
-  pins=[Pin(num=str(n), name=str(n), func=Pin.types.PASSIVE) for n in range(1, 9)])
+J2 = Part(tool=SKIDL, name='MPS-06-01-RA', ref_prefix='J', dest=NETLIST,
+  footprint='power:SAMTEC_MPS-06-01-X-X-RA-SD',
+  pins=[Pin(num=f'{_pos:02d}_{_pin}', name=f'{_pos:02d}_{_pin}',
+            func=Pin.types.PASSIVE)
+        for _pos in range(1, 7) for _pin in range(1, 7)])
 J2.ref = 'J2'
-J2[1] += vbus54; J2[2] += vbus54; J2[3] += vin24; J2[4] += vdd33
-J2[5] += gnd;    J2[6] += gnd;    J2[7] += vdd5;  J2[8] += main_en
+# position p (1..6) -- same net order as the core MPT blades (mate by position)
+for _pos, _net in enumerate((vbus54, gnd, vin24, vdd5, vdd33, main_en), start=1):
+  for _pin in range(1, 7):
+    J2[f'{_pos:02d}_{_pin}'] += _net
 
 # ============================================================
 # Mounting holes -- M3, bond the metal frame to PE. This is how the input
@@ -369,4 +373,4 @@ with open('netlist_s5power.net', 'w') as f:
   f.write(content)
 
 print(f"s5-power netlist: C1-C{_cref[0]}, R1-R{_rref[0]}, L1-L{_lref[0]}, "
-      f"U1(boost) U2(buck) U3(3v3), J1(input) J2(8-way solder field), MH1-4(PE)")
+      f"U1(boost) U2(buck) U3(3v3), J1(input) J2(MPS-06 socket), MH1-4(PE)")

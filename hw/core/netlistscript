@@ -146,28 +146,25 @@ vpse33 = Net('VDD_3V3_PSE')  # PoE housekeeping 3.3V -- always on (rides cycle)
 pse_reset = Net('PSE_RESET_N') # STM pulls low = reset PSEs = shed PoE (thermal)
 
 # ============================================================
-# Board-to-board POWER INTERCONNECT -- core end is the SERVICEABLE side:
-# POPULATE the Molex Mini-Fit Jr 2x4 RIGHT-ANGLE header here (5569-08A1),
-# so the plug + cable exit off the board edge (low profile for the 35mm box).
-# The mate is an off-the-shelf Mini-Fit Versa 8-ckt cable assembly: receptacle
-# on this end (latched, so the core board unplugs for service), 16AWG/9A wire,
-# stripped-and-tinned far end soldered permanently into the POWER board field
-# (J2). All switching (input protection, LM5122 boost, TPS54560 buck, 3V3 LDO)
-# lives on the power board; the core receives finished rails here + drives
-# MAIN_EN back to gate the buck.
-# Mini-Fit 4.2mm is 9A/circuit w/ 16AWG -- VBUS 3.5A/pin, GND 4.4A/pin (loose).
-# 8-ckt map (rows 1-4 top / 5-8 bottom, col-paired VBUS/GND). Matches power J2.
-#   1=VBUS 2=VBUS 3=VIN_24V 4=VDD_3V3 / 5=GND 6=GND 7=VDD_5V 8=MAIN_EN
+# Board-to-board POWER INTERCONNECT -- Samtec PowerStrip MP, right-angle,
+# COPLANAR edge-to-edge mate, NO cable. The CORE board carries the MPT-06
+# terminal (male blades); the POWER board carries the MPS-06 socket (female,
+# recessed contacts -- it is the energized SOURCE side, so no exposed live
+# blades when the boards are separated). 6 positions, each a 20A+ dual-blade
+# landed on 6 paralleled THT pins (36 holes). The two boards face each other,
+# so MPT blade N mates MPS position N.
+# blade -> net: 1=VBUS_54V 2=GND 3=VIN_24V 4=VDD_5V 5=VDD_3V3 6=MAIN_EN
 # VIN_24V = protected 24V for the always-on standby LDOs (U18/U20) + relay K1.
 # ============================================================
-J9 = Part(tool=SKIDL, name='Conn_02x04', ref_prefix='J', dest=NETLIST,
-  footprint='Connector_Molex:'
-            'Molex_Mini-Fit_Jr_5569-08A1_2x04_P4.20mm_Horizontal',
+J9 = Part(tool=SKIDL, name='MPT-06-01-RA', ref_prefix='J', dest=NETLIST,
+  footprint='connectors:MPT-06-01-XX-X-RA-SD',
   pins=[Pin(num=str(i), name=str(i), func=Pin.types.PASSIVE)
-        for i in range(1, 9)])
+        for i in range(1, 37)])
 J9.ref = 'J9'
-J9[1] += vbus54; J9[2] += vbus54; J9[3] += vin24; J9[4] += vdd33
-J9[5] += gnd;    J9[6] += gnd;    J9[7] += vdd5;  J9[8] += main_en
+# blade b (0..5) = pads 6b+1 .. 6b+6, all tied to one net
+for _b, _net in enumerate((vbus54, gnd, vin24, vdd5, vdd33, main_en)):
+  for _p in range(1, 7):
+    J9[str(_b * 6 + _p)] += _net
 # VBUS-54V entry bulk (>=100V rated -- MUST NOT drop to a 0805/50V part)
 c = cap('10uF', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vbus54; c[2] += gnd
 # (vin24/vdd5/vdd33 entry bulk is added by the per-rail loop below.)
