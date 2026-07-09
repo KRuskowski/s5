@@ -337,7 +337,7 @@ J2 = Part(tool=SKIDL, name='MPS-06-01-RA', ref_prefix='J', dest=NETLIST,
         for _pos in range(1, 7) for _pin in range(1, 7)])
 J2.ref = 'J2'
 # position p (1..6) -- same net order as the core MPT blades (mate by position)
-for _pos, _net in enumerate((vbus54, gnd, vin24, vdd5, vdd33, main_en), start=1):
+for _pos, _net in enumerate((main_en, gnd, vin24, vdd5, vdd33, vbus54), start=1):
   for _pin in range(1, 7):
     J2[f'{_pos:02d}_{_pin}'] += _net
 

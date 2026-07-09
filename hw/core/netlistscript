@@ -162,7 +162,7 @@ J9 = Part(tool=SKIDL, name='MPT-06-01-RA', ref_prefix='J', dest=NETLIST,
         for i in range(1, 37)])
 J9.ref = 'J9'
 # blade b (0..5) = pads 6b+1 .. 6b+6, all tied to one net
-for _b, _net in enumerate((vbus54, gnd, vin24, vdd5, vdd33, main_en)):
+for _b, _net in enumerate((main_en, gnd, vin24, vdd5, vdd33, vbus54)):
   for _p in range(1, 7):
     J9[str(_b * 6 + _p)] += _net
 # VBUS-54V entry bulk (>=100V rated -- MUST NOT drop to a 0805/50V part)
@@ -1291,12 +1291,12 @@ U19[12] += di_sense                                # STM reads the DI
 #   assembly -- fit the 0R to hard-bond, or leave just the R||C to
 #   HF-couple while staying DC-isolated (kills ground loops).
 # ============================================================
-for _mh in ('MH1', 'MH2', 'MH3', 'MH4'):
+for _mh in ('MH1', 'MH2', 'MH3', 'MH4', 'MH5', 'MH6'):
   mh = Part(tool=SKIDL, name='MountingHole_M2.5_PE', ref_prefix='MH',
             dest=NETLIST, footprint='connectors:MountingHole_2.7mm_M2.5_6mmPad',
             pins=[Pin(num='1', name='1', func=Pin.types.PASSIVE)])
   mh.ref = _mh
-  mh[1] += earth        # frame -> PE, all four corners
+  mh[1] += earth        # frame -> PE; 6 points (4 corners + 2 mid) on the big board
 
 # GND <-> PE stitch (one controlled bond, tunable at assembly)
 r = res('1M'); r[1] += gnd; r[2] += earth                 # bleed / DC leak path
