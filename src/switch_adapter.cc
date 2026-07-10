@@ -1,26 +1,26 @@
 /// @file switch_adapter.cc
-/// @brief KSZ9477 switch adapter for Linux DSA + TPS23861 PoE.
+/// @brief KSZ9477 switch adapter — declarative specs + rendering.
+///
+/// Display-only by construction (gap #4): this file never touches
+/// hardware. Reads and operational actions execute in
+/// service::HandleProduct on the daemon side of the in-proc
+/// transport; config mutations go through the confd runtime into
+/// S5Backend::Apply. RenderResponse only decodes the returned data
+/// blob into semantic tables.
 // Copyright (c) 2026 Einheit Networks
 
-#include "einheit/s5/dsa.h"
-#include "einheit/s5/poe.h"
-#include "einheit/s5/sys.h"
-#include "einheit/s5/util.h"
+#include "einheit/s5/switch_adapter.h"
 
-#include <climits>
-#include <cerrno>
-#include <cstdlib>
 #include <format>
 #include <memory>
-#include <optional>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "einheit/cli/adapter.h"
 #include "einheit/cli/command_tree.h"
 #include "einheit/cli/protocol/envelope.h"
 #include "einheit/cli/render/table.h"
-#include "einheit/cli/schema.h"
 
 namespace einheit::s5 {
 namespace {
@@ -33,85 +33,49 @@ using cli::protocol::ResponseStatus;
 using cli::render::Renderer;
 using cli::schema::Schema;
 
-auto ExtractArgs(const Response &r) -> std::vector<std::string> {
-  std::vector<std::string> args;
-  std::string current;
-  for (auto b : r.data) {
-    if (b == 0) {
-      args.push_back(std::move(current));
-      current.clear();
-    } else {
-      current += static_cast<char>(b);
+/// Split the service's line-oriented data blob into rows of
+/// tab-separated fields.
+auto DecodeRows(const Response &r)
+    -> std::vector<std::vector<std::string>> {
+  std::vector<std::vector<std::string>> rows;
+  const std::string body(r.data.begin(), r.data.end());
+  std::istringstream iss(body);
+  std::string line;
+  while (std::getline(iss, line)) {
+    if (line.empty()) continue;
+    std::vector<std::string> fields;
+    std::string field;
+    std::istringstream ls(line);
+    while (std::getline(ls, field, '\t')) {
+      fields.push_back(field);
     }
+    rows.push_back(std::move(fields));
   }
-  if (!current.empty()) args.push_back(std::move(current));
-  return args;
+  return rows;
 }
 
-auto Arg(const Response &r, std::size_t idx) -> std::string {
-  auto args = ExtractArgs(r);
-  return idx < args.size() ? args[idx] : "";
+auto Field(const std::vector<std::string> &row, std::size_t idx)
+    -> std::string {
+  return idx < row.size() ? row[idx] : "";
 }
-
-/// Parse an integer argument without ever throwing. Returns
-/// std::nullopt on empty/non-numeric input so callers render a
-/// clean error instead of aborting on std::stoi.
-auto ParseInt(const std::string &s) -> std::optional<int> {
-  if (s.empty()) return std::nullopt;
-  errno = 0;
-  char *end = nullptr;
-  const long v = std::strtol(s.c_str(), &end, 10);
-  if (end == s.c_str() || *end != '\0' || errno != 0 ||
-      v < INT_MIN || v > INT_MAX) {
-    return std::nullopt;
-  }
-  return static_cast<int>(v);
-}
-
-/// Parse a port argument, validating the 1-5 range.
-auto ParsePort(const std::string &s) -> std::optional<int> {
-  auto v = ParseInt(s);
-  if (!v || *v < 1 || *v > 5) return std::nullopt;
-  return v;
-}
-
-constexpr const char *kSchemaYaml = R"(
-version: 1
-product: s5
-
-config:
-  hostname:
-    type: string
-    help: "Switch hostname"
-    example: "s5-rack01"
-)";
 
 class SwitchAdapter : public ProductAdapter {
  public:
-  SwitchAdapter() {
-    ports_ = dsa::DiscoverPorts();
-    // schema_ MUST never be null — GetSchema() returns *schema_,
-    // and completion for `set <tab>` dereferences it. A null here
-    // is a segfault, not a catchable exception.
-    schema_ = std::make_shared<Schema>();
-  }
+  explicit SwitchAdapter(cli::schema::SchemaHandle schema)
+      : schema_(std::move(schema)) {}
 
   auto Metadata() const -> ProductMetadata override {
     return {
         .id = "s5",
         .display_name = "einheit S5",
-        .version = "0.1.0",
+        .version = "0.2.0",
         .banner = "einheit S5 — 5-port managed gigabit PoE switch",
         .prompt = "S5",
     };
   }
 
   auto GetSchema() const -> const Schema & override {
-    return *schema_;
-  }
-
-  void SetSchema(std::shared_ptr<Schema> s) {
-    schema_ = std::move(s);
+    return schema_.Get();
   }
 
   auto ControlSocketPath() const -> std::string override {
@@ -124,13 +88,17 @@ class SwitchAdapter : public ProductAdapter {
 
   auto Commands() const
       -> std::vector<CommandSpec> override {
+    // Reads and operational actions only. Config mutations
+    // (hostname, interface addressing, DNS, NTP, port admin
+    // state, PoE enable/limits) live in the schema and go through
+    // the framework's configure / set / commit lifecycle.
     return {
         CommandSpec{
             .path = "show interfaces",
             .args = {{.name = "port", .help = "Port name",
                       .required = false}},
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show interfaces",
+            .wire_command = "show_interfaces",
             .help = "Show port status",
         },
         CommandSpec{
@@ -138,52 +106,49 @@ class SwitchAdapter : public ProductAdapter {
             .args = {{.name = "port", .help = "Port name",
                       .required = false}},
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show counters",
+            .wire_command = "show_counters",
             .help = "Show port counters",
         },
         CommandSpec{
             .path = "show mac-table",
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show mac-table",
+            .wire_command = "show_mac_table",
             .help = "Show learned MAC addresses",
         },
         CommandSpec{
             .path = "show vlans",
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show vlans",
+            .wire_command = "show_vlans",
             .help = "Show VLAN configuration",
         },
         CommandSpec{
             .path = "show version",
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show version",
+            .wire_command = "show_version",
             .help = "Show switch information",
         },
-        // `shell` is provided by the framework globals
-        // (audit-logged); no adapter entry needed.
-        // System management.
         CommandSpec{
             .path = "show system",
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show system",
+            .wire_command = "show_system",
             .help = "Show system info",
         },
         CommandSpec{
             .path = "show ip",
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show ip",
+            .wire_command = "show_ip",
             .help = "Show IP addresses",
         },
         CommandSpec{
             .path = "show dns",
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show dns",
+            .wire_command = "show_dns",
             .help = "Show DNS servers",
         },
         CommandSpec{
             .path = "show ntp",
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show ntp",
+            .wire_command = "show_ntp",
             .help = "Show NTP status",
         },
         CommandSpec{
@@ -191,73 +156,47 @@ class SwitchAdapter : public ProductAdapter {
             .args = {{.name = "lines", .help = "Number of lines",
                       .required = false}},
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show log",
+            .wire_command = "show_log",
             .help = "Show syslog",
         },
         CommandSpec{
             .path = "show users",
             .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show users",
+            .wire_command = "show_users",
             .help = "Show user accounts",
         },
         CommandSpec{
-            .path = "set hostname",
-            .args = {{.name = "name", .help = "Hostname",
-                      .required = true}},
-            .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set hostname",
-            .help = "Set system hostname",
+            .path = "show poe",
+            .args = {{.name = "port", .help = "Port number 1-5",
+                      .required = false}},
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_poe",
+            .help = "Show PoE status",
         },
         CommandSpec{
-            .path = "set interface address",
-            .args = {{.name = "iface", .help = "e.g. eth0",
-                      .required = true},
-                     {.name = "addr", .help = "IP/mask e.g. 10.0.0.1/24",
+            .path = "poe reset",
+            .args = {{.name = "port", .help = "Port number 1-5",
                       .required = true}},
             .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set interface address",
-            .help = "Set static IP address",
+            .wire_command = "poe_reset",
+            .help = "Power-cycle a PoE port",
         },
         CommandSpec{
-            .path = "set interface dhcp",
-            .args = {{.name = "iface", .help = "e.g. eth0",
-                      .required = true}},
-            .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set interface dhcp",
-            .help = "Enable DHCP on interface",
-        },
-        CommandSpec{
-            .path = "set dns",
-            .args = {{.name = "server", .help = "DNS server IP",
-                      .required = true}},
-            .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set dns",
-            .help = "Set DNS nameserver",
-        },
-        CommandSpec{
-            .path = "set ntp",
-            .args = {{.name = "server", .help = "NTP server IP",
-                      .required = true}},
-            .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set ntp",
-            .help = "Set NTP server",
-        },
-        CommandSpec{
-            .path = "set user",
+            .path = "user add",
             .args = {{.name = "name", .help = "Username",
                       .required = true},
                      {.name = "role", .help = "admin|operator",
                       .required = true}},
             .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set user",
+            .wire_command = "user_add",
             .help = "Add or update a user",
         },
         CommandSpec{
-            .path = "delete user",
+            .path = "user remove",
             .args = {{.name = "name", .help = "Username",
                       .required = true}},
             .role = cli::RoleGate::AdminOnly,
-            .wire_command = "delete user",
+            .wire_command = "user_remove",
             .help = "Remove a user",
         },
         CommandSpec{
@@ -282,39 +221,6 @@ class SwitchAdapter : public ProductAdapter {
             .wire_command = "reboot",
             .help = "Reboot the system",
         },
-        // PoE commands.
-        CommandSpec{
-            .path = "show poe",
-            .args = {{.name = "port", .help = "Port number 1-5",
-                      .required = false}},
-            .role = cli::RoleGate::AnyAuthenticated,
-            .wire_command = "show poe",
-            .help = "Show PoE status",
-        },
-        CommandSpec{
-            .path = "set poe enable",
-            .args = {{.name = "port", .help = "Port number 1-5",
-                      .required = true}},
-            .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set poe enable",
-            .help = "Enable PoE on a port",
-        },
-        CommandSpec{
-            .path = "set poe disable",
-            .args = {{.name = "port", .help = "Port number 1-5",
-                      .required = true}},
-            .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set poe disable",
-            .help = "Disable PoE on a port",
-        },
-        CommandSpec{
-            .path = "set poe reset",
-            .args = {{.name = "port", .help = "Port number 1-5",
-                      .required = true}},
-            .role = cli::RoleGate::AdminOnly,
-            .wire_command = "set poe reset",
-            .help = "Power-cycle a PoE port",
-        },
     };
   }
 
@@ -334,25 +240,24 @@ class SwitchAdapter : public ProductAdapter {
 
     const auto &wire = cmd.wire_command;
 
-    if (wire == "show interfaces") {
+    if (wire == "show_interfaces") {
       Table t;
       AddColumn(t, "port", Align::Left, Priority::High);
       AddColumn(t, "link", Align::Left, Priority::High);
       AddColumn(t, "speed", Align::Left, Priority::Medium);
       AddColumn(t, "duplex", Align::Left, Priority::Medium);
-
-      for (const auto &name : ports_) {
-        auto st = dsa::GetPortStatus(name);
+      for (const auto &row : DecodeRows(response)) {
+        const bool up = Field(row, 1) == "up";
         AddRow(t, {
-            Cell{st.name, Semantic::Emphasis},
-            Cell{st.link ? "up" : "down",
-                 st.link ? Semantic::Good : Semantic::Bad},
-            Cell{st.speed},
-            Cell{st.duplex},
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1),
+                 up ? Semantic::Good : Semantic::Bad},
+            Cell{Field(row, 2)},
+            Cell{Field(row, 3)},
         });
       }
       RenderFormatted(t, renderer);
-    } else if (wire == "show counters") {
+    } else if (wire == "show_counters") {
       Table t;
       AddColumn(t, "port", Align::Left, Priority::High);
       AddColumn(t, "rx_bytes", Align::Right, Priority::High);
@@ -360,238 +265,116 @@ class SwitchAdapter : public ProductAdapter {
       AddColumn(t, "rx_pkts", Align::Right, Priority::Medium);
       AddColumn(t, "tx_pkts", Align::Right, Priority::Medium);
       AddColumn(t, "rx_err", Align::Right, Priority::Low);
-
-      for (const auto &name : ports_) {
-        auto c = dsa::GetPortCounters(name);
+      for (const auto &row : DecodeRows(response)) {
+        const bool errors = Field(row, 5) != "0";
         AddRow(t, {
-            Cell{c.name, Semantic::Emphasis},
-            Cell{std::to_string(c.rx_bytes)},
-            Cell{std::to_string(c.tx_bytes)},
-            Cell{std::to_string(c.rx_packets)},
-            Cell{std::to_string(c.tx_packets)},
-            Cell{std::to_string(c.rx_errors),
-                 c.rx_errors ? Semantic::Warn : Semantic::Dim},
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1)},
+            Cell{Field(row, 2)},
+            Cell{Field(row, 3)},
+            Cell{Field(row, 4)},
+            Cell{Field(row, 5),
+                 errors ? Semantic::Warn : Semantic::Dim},
         });
       }
       RenderFormatted(t, renderer);
-    } else if (wire == "show mac-table") {
-      auto macs = dsa::GetMacTable();
+    } else if (wire == "show_mac_table") {
+      const auto rows = DecodeRows(response);
+      if (rows.empty()) {
+        renderer.Out() << "  (empty)\n";
+        return;
+      }
       Table t;
       AddColumn(t, "mac", Align::Left, Priority::High);
       AddColumn(t, "port", Align::Left, Priority::High);
       AddColumn(t, "vlan", Align::Right, Priority::Medium);
-
-      for (const auto &e : macs) {
+      for (const auto &row : rows) {
         AddRow(t, {
-            Cell{e.mac},
-            Cell{e.port, Semantic::Emphasis},
-            Cell{std::to_string(e.vid), Semantic::Dim},
+            Cell{Field(row, 0)},
+            Cell{Field(row, 1), Semantic::Emphasis},
+            Cell{Field(row, 2), Semantic::Dim},
         });
       }
-      if (macs.empty()) {
-        renderer.Out() << "  (empty)\n";
-      } else {
-        RenderFormatted(t, renderer);
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_vlans") {
+      const auto rows = DecodeRows(response);
+      if (rows.empty()) {
+        renderer.Out() << "  (no VLANs)\n";
+        return;
       }
-    } else if (wire == "show vlans") {
-      auto vlans = dsa::GetVlans();
       Table t;
       AddColumn(t, "vid", Align::Right, Priority::High);
       AddColumn(t, "port", Align::Left, Priority::High);
       AddColumn(t, "untagged", Align::Left, Priority::Medium);
       AddColumn(t, "pvid", Align::Left, Priority::Medium);
-
-      for (const auto &v : vlans) {
+      for (const auto &row : rows) {
         AddRow(t, {
-            Cell{std::to_string(v.vid), Semantic::Emphasis},
-            Cell{v.port},
-            Cell{v.untagged ? "yes" : "-", Semantic::Dim},
-            Cell{v.pvid ? "yes" : "-", Semantic::Dim},
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1)},
+            Cell{Field(row, 2), Semantic::Dim},
+            Cell{Field(row, 3), Semantic::Dim},
         });
       }
-      if (vlans.empty()) {
-        renderer.Out() << "  (no VLANs)\n";
-      } else {
-        RenderFormatted(t, renderer);
-      }
-    } else if (wire == "show version") {
-      renderer.Out()
-          << std::format("  product: einheit s5\n")
-          << std::format("  ports:   {}\n", ports_.size());
-      for (const auto &p : ports_) {
-        renderer.Out() << std::format("    {}\n", p);
-      }
-    } else if (wire == "show system") {
-      auto hostname = sys::GetHostname();
-      auto uptime = sys::GetUptime();
-      auto mem = sys::GetMemInfo();
-      auto disk = sys::GetDiskInfo();
-      auto temp = sys::GetCpuTemp();
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_system" || wire == "show_ntp") {
       Table t;
       AddColumn(t, "field", Align::Left, Priority::High);
       AddColumn(t, "value", Align::Left, Priority::High);
-      AddRow(t, {Cell{"hostname", Semantic::Emphasis},
-                 Cell{hostname}});
-      AddRow(t, {Cell{"uptime", Semantic::Emphasis},
-                 Cell{uptime}});
-      AddRow(t, {Cell{"cpu temp", Semantic::Emphasis},
-                 Cell{temp}});
-      AddRow(t, {Cell{"memory", Semantic::Emphasis},
-                 Cell{std::format("{} MB / {} MB",
-                      mem.avail_kb / 1024,
-                      mem.total_kb / 1024)}});
-      AddRow(t, {Cell{"disk", Semantic::Emphasis},
-                 Cell{std::format("{} / {} ({})",
-                      disk.used, disk.size, disk.use_pct)}});
-      AddRow(t, {Cell{"ports", Semantic::Emphasis},
-                 Cell{std::to_string(ports_.size())}});
+      for (const auto &row : DecodeRows(response)) {
+        auto sem = Semantic::Default;
+        if (wire == "show_ntp" && Field(row, 0) == "synced") {
+          sem = Field(row, 1) == "yes" ? Semantic::Good
+                                       : Semantic::Warn;
+        }
+        AddRow(t, {Cell{Field(row, 0), Semantic::Emphasis},
+                   Cell{Field(row, 1), sem}});
+      }
       RenderFormatted(t, renderer);
-    } else if (wire == "show ip") {
-      auto ifaces = sys::GetInterfaces();
+    } else if (wire == "show_ip") {
       Table t;
       AddColumn(t, "interface", Align::Left, Priority::High);
       AddColumn(t, "address", Align::Left, Priority::High);
       AddColumn(t, "state", Align::Left, Priority::Medium);
       AddColumn(t, "mac", Align::Left, Priority::Low);
-      for (const auto &i : ifaces) {
+      for (const auto &row : DecodeRows(response)) {
         AddRow(t, {
-            Cell{i.name, Semantic::Emphasis},
-            Cell{i.address},
-            Cell{i.state, i.state == "up"
-                              ? Semantic::Good
-                              : Semantic::Bad},
-            Cell{i.mac, Semantic::Dim},
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1)},
+            Cell{Field(row, 2), Field(row, 2) == "up"
+                                    ? Semantic::Good
+                                    : Semantic::Bad},
+            Cell{Field(row, 3), Semantic::Dim},
         });
       }
       RenderFormatted(t, renderer);
-    } else if (wire == "show dns") {
-      auto servers = sys::GetDnsServers();
+    } else if (wire == "show_dns") {
+      const auto rows = DecodeRows(response);
+      if (rows.empty()) {
+        renderer.Out() << "  (no DNS configured)\n";
+        return;
+      }
       Table t;
       AddColumn(t, "nameserver", Align::Left, Priority::High);
-      for (const auto &s : servers) {
-        AddRow(t, {Cell{s, Semantic::Info}});
+      for (const auto &row : rows) {
+        AddRow(t, {Cell{Field(row, 0), Semantic::Info}});
       }
-      if (servers.empty()) {
-        renderer.Out() << "  (no DNS configured)\n";
-      } else {
-        RenderFormatted(t, renderer);
-      }
-    } else if (wire == "show ntp") {
-      auto ntp = sys::GetNtpStatus();
-      Table t;
-      AddColumn(t, "field", Align::Left, Priority::High);
-      AddColumn(t, "value", Align::Left, Priority::High);
-      AddRow(t, {Cell{"synced", Semantic::Emphasis},
-                 Cell{ntp.synced ? "yes" : "no",
-                      ntp.synced ? Semantic::Good
-                                 : Semantic::Warn}});
-      AddRow(t, {Cell{"server", Semantic::Emphasis},
-                 Cell{ntp.server}});
       RenderFormatted(t, renderer);
-    } else if (wire == "show log") {
-      auto arg = Arg(response, 0);
-      int lines = 20;
-      if (!arg.empty()) {
-        auto n = ParseInt(arg);
-        if (!n || *n < 1) {
-          renderer.Out() << std::format(
-              "  invalid line count: '{}'\n", arg);
-          return;
-        }
-        lines = *n;
-      }
-      auto log = sys::GetSyslog(lines);
-      renderer.Out() << log;
-    } else if (wire == "show users") {
-      auto users = sys::GetUsers();
+    } else if (wire == "show_users") {
       Table t;
       AddColumn(t, "user", Align::Left, Priority::High);
       AddColumn(t, "role", Align::Left, Priority::High);
       AddColumn(t, "uid", Align::Right, Priority::Medium);
-      for (const auto &u : users) {
+      for (const auto &row : DecodeRows(response)) {
         AddRow(t, {
-            Cell{u.name, Semantic::Emphasis},
-            Cell{u.role, u.role == "admin"
-                             ? Semantic::Warn
-                             : Semantic::Info},
-            Cell{std::to_string(u.uid), Semantic::Dim},
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1), Field(row, 1) == "admin"
+                                    ? Semantic::Warn
+                                    : Semantic::Info},
+            Cell{Field(row, 2), Semantic::Dim},
         });
       }
       RenderFormatted(t, renderer);
-    } else if (wire == "set hostname") {
-      auto name = Arg(response, 0);
-      if (sys::SetHostname(name)) {
-        renderer.Out() << std::format("  hostname set to '{}'\n",
-                                      name);
-      } else {
-        renderer.Out() << "  failed to set hostname\n";
-      }
-    } else if (wire == "set interface address") {
-      auto iface = Arg(response, 0);
-      auto addr = Arg(response, 1);
-      if (sys::SetInterfaceAddr(iface, addr)) {
-        renderer.Out() << std::format(
-            "  {} set to {}\n", iface, addr);
-      } else {
-        renderer.Out() << "  failed to set address\n";
-      }
-    } else if (wire == "set interface dhcp") {
-      auto iface = Arg(response, 0);
-      if (sys::SetInterfaceDhcp(iface)) {
-        renderer.Out() << std::format(
-            "  DHCP started on {}\n", iface);
-      } else {
-        renderer.Out() << "  failed to start DHCP\n";
-      }
-    } else if (wire == "set dns") {
-      auto server = Arg(response, 0);
-      if (sys::SetDnsServers({server})) {
-        renderer.Out() << std::format(
-            "  DNS set to {}\n", server);
-      } else {
-        renderer.Out() << "  failed to set DNS\n";
-      }
-    } else if (wire == "set ntp") {
-      auto server = Arg(response, 0);
-      if (sys::SetNtpServer(server)) {
-        renderer.Out() << std::format(
-            "  NTP set to {}\n", server);
-      } else {
-        renderer.Out() << "  failed to set NTP\n";
-      }
-    } else if (wire == "set user") {
-      auto name = Arg(response, 0);
-      auto role = Arg(response, 1);
-      if (sys::AddUser(name, role)) {
-        renderer.Out() << std::format(
-            "  user '{}' added as {}\n", name, role);
-      } else {
-        renderer.Out() << "  failed to add user\n";
-      }
-    } else if (wire == "delete user") {
-      auto name = Arg(response, 0);
-      if (sys::DelUser(name)) {
-        renderer.Out() << std::format(
-            "  user '{}' removed\n", name);
-      } else {
-        renderer.Out() << "  failed to remove user\n";
-      }
-    } else if (wire == "ping") {
-      auto host = Arg(response, 0);
-      renderer.Out().flush();
-      std::system(
-          ("ping -c 4 " + host + " 2>&1").c_str());
-    } else if (wire == "traceroute") {
-      auto host = Arg(response, 0);
-      renderer.Out().flush();
-      std::system(
-          ("traceroute " + host + " 2>&1").c_str());
-    } else if (wire == "reboot") {
-      renderer.Out() << "  rebooting...\n";
-      renderer.Out().flush();
-      sys::Reboot();
-    } else if (wire == "show poe") {
-      auto statuses = poe::GetAllStatus();
+    } else if (wire == "show_poe") {
       Table t;
       AddColumn(t, "port", Align::Right, Priority::High);
       AddColumn(t, "status", Align::Left, Priority::High);
@@ -599,59 +382,41 @@ class SwitchAdapter : public ProductAdapter {
       AddColumn(t, "current", Align::Right, Priority::Medium);
       AddColumn(t, "power", Align::Right, Priority::High);
       AddColumn(t, "class", Align::Left, Priority::Low);
-      for (const auto &s : statuses) {
+      std::string total;
+      for (const auto &row : DecodeRows(response)) {
+        if (Field(row, 0) == "total") {
+          total = Field(row, 1);
+          continue;
+        }
+        const auto &state = Field(row, 2);
         AddRow(t, {
-            Cell{std::to_string(s.port), Semantic::Emphasis},
-            Cell{s.status,
-                 s.delivering ? Semantic::Good :
-                 s.enabled ? Semantic::Warn : Semantic::Dim},
-            Cell{std::format("{:.1f}V", s.voltage_v)},
-            Cell{std::format("{:.0f}mA", s.current_ma)},
-            Cell{std::format("{:.1f}W", s.power_w)},
-            Cell{s.classification, Semantic::Dim},
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1),
+                 state == "delivering" ? Semantic::Good :
+                 state == "enabled" ? Semantic::Warn
+                                    : Semantic::Dim},
+            Cell{std::format("{}V", Field(row, 3))},
+            Cell{std::format("{}mA", Field(row, 4))},
+            Cell{std::format("{}W", Field(row, 5))},
+            Cell{Field(row, 6), Semantic::Dim},
         });
       }
       RenderFormatted(t, renderer);
-      renderer.Out() << std::format(
-          "  total: {:.1f}W\n", poe::GetTotalPower());
-    } else if (wire == "set poe enable") {
-      auto port = ParsePort(Arg(response, 0));
-      if (!port) {
-        renderer.Out() << "  invalid port (expected 1-5)\n";
-        return;
+      if (!total.empty()) {
+        renderer.Out() << std::format("  total: {}W\n", total);
       }
-      if (poe::SetPortEnabled(*port, true)) {
-        renderer.Out() << std::format(
-            "  PoE enabled on port {}\n", *port);
-      } else {
-        renderer.Out() << "  failed to enable PoE\n";
-      }
-    } else if (wire == "set poe disable") {
-      auto port = ParsePort(Arg(response, 0));
-      if (!port) {
-        renderer.Out() << "  invalid port (expected 1-5)\n";
-        return;
-      }
-      if (poe::SetPortEnabled(*port, false)) {
-        renderer.Out() << std::format(
-            "  PoE disabled on port {}\n", *port);
-      } else {
-        renderer.Out() << "  failed to disable PoE\n";
-      }
-    } else if (wire == "set poe reset") {
-      auto port = ParsePort(Arg(response, 0));
-      if (!port) {
-        renderer.Out() << "  invalid port (expected 1-5)\n";
-        return;
-      }
-      renderer.Out() << std::format(
-          "  power-cycling port {}...\n", *port);
-      renderer.Out().flush();
-      if (poe::ResetPort(*port)) {
-        renderer.Out() << "  done\n";
-      } else {
-        renderer.Out() << "  failed\n";
-      }
+    } else if (wire == "show_version" || wire == "show_log" ||
+               wire == "ping" || wire == "traceroute") {
+      // Free-form text: pass through as-is.
+      renderer.Out() << std::string(response.data.begin(),
+                                    response.data.end());
+    } else if (wire == "poe_reset" || wire == "user_add" ||
+               wire == "user_remove" || wire == "reboot") {
+      renderer.Out() << "  "
+                     << std::string(response.data.begin(),
+                                    response.data.end());
+    } else {
+      RenderKvLines(response, renderer);
     }
   }
 
@@ -665,15 +430,71 @@ class SwitchAdapter : public ProductAdapter {
                    Renderer &) const -> void override {}
 
  private:
-  std::vector<std::string> ports_;
-  std::shared_ptr<Schema> schema_;
+  /// Generic renderer for the confd runtime's key=value line
+  /// format (show config / show commits / show commit / show
+  /// status). `show commit` prefixes lines with a diff marker
+  /// (+/-/~/=); colour accordingly.
+  static auto RenderKvLines(const Response &response,
+                            Renderer &renderer) -> void {
+    using namespace cli::render;
+    if (response.data.empty()) {
+      Table t;
+      AddColumn(t, "status", Align::Left, Priority::High);
+      AddRow(t, {Cell{"ok", Semantic::Good}});
+      RenderFormatted(t, renderer);
+      return;
+    }
+    Table t;
+    AddColumn(t, "field", Align::Left, Priority::High);
+    AddColumn(t, "value", Align::Left, Priority::High);
+    const std::string body(response.data.begin(),
+                           response.data.end());
+    std::istringstream iss(body);
+    std::string line;
+    while (std::getline(iss, line)) {
+      if (line.empty()) continue;
+      Semantic key_sem = Semantic::Emphasis;
+      Semantic val_sem = Semantic::Default;
+      char marker = 0;
+      if (line[0] == '+' || line[0] == '-' || line[0] == '~' ||
+          line[0] == '=') {
+        marker = line[0];
+        line.erase(0, 1);
+        switch (marker) {
+          case '+': key_sem = val_sem = Semantic::Good; break;
+          case '-': key_sem = val_sem = Semantic::Bad; break;
+          case '~': key_sem = val_sem = Semantic::Warn; break;
+          case '=': key_sem = val_sem = Semantic::Dim; break;
+        }
+      }
+      const auto eq = line.find('=');
+      std::string key = line;
+      std::string val;
+      if (eq != std::string::npos) {
+        key = line.substr(0, eq);
+        val = line.substr(eq + 1);
+      }
+      if (marker == 0) {
+        if (key == "commit_id" || key == "status") {
+          val_sem = Semantic::Good;
+        } else if (val.empty() || val == "<none>") {
+          val_sem = Semantic::Dim;
+        }
+      }
+      if (marker) key = std::format("{} {}", marker, key);
+      AddRow(t, {Cell{key, key_sem}, Cell{val, val_sem}});
+    }
+    RenderFormatted(t, renderer);
+  }
+
+  cli::schema::SchemaHandle schema_;
 };
 
 }  // namespace
 
-auto MakeSwitchAdapter()
+auto MakeSwitchAdapter(cli::schema::SchemaHandle schema)
     -> std::unique_ptr<ProductAdapter> {
-  return std::make_unique<SwitchAdapter>();
+  return std::make_unique<SwitchAdapter>(std::move(schema));
 }
 
 }  // namespace einheit::s5

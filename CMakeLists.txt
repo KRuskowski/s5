@@ -16,6 +16,8 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../cli einheit_cli)
 add_executable(einheit_s5
   src/main.cc
   src/switch_adapter.cc
+  src/backend.cc
+  src/service.cc
   src/dsa.cc
   src/poe.cc
   src/util.cc
