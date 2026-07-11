@@ -23,7 +23,7 @@ return. The EP→GND connection is not optional.
 | RTC | VCC-RTC | 26 | 3.3 V |
 | DRAM I/O | VCC-DRAM0/1, VDD18-DRAM | 48, 49, 50 | 1.8 V |
 | DRAM ZQ cal | DZQ | 47 | (240 Ω to GND) |
-| Analog | AVCC | 89 | 3.3 V (filtered) |
+| Analog | AVCC | 89 | 1.8 V (analog; ferrite/RC filter recommended) |
 | Internal LDO | LDO-IN / LDOA-OUT / LDOB-OUT | 29 / 28 / 30 | in 3.3 V, outs bypass |
 | Ground | AGND | 91 | + **EP = GND** |
 | 24 MHz osc | DXIN / DXOUT | 23 / 22 | DCXO |

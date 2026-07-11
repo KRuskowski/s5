@@ -78,16 +78,26 @@ in NAND). Different image pipeline from the firewall (T527 + eMMC + Debian).
   board interconnect = Samtec PowerStrip (replaced the cable) · mounting M2.5.
 
 ### Open hardware items
-1. **RGMII 25 MHz clock reference — OPEN.** T113 `RGMII_CLKIN_25M` (pin 125 /
-   PG13) is floating; KSZ `SYNCLKO` (pin 95) is only pulled up, not routed to
-   it. Needs a source wired (SYNCLKO → CLKIN, or external osc) — under review.
-2. **KSZ analog-supply ferrite — OPEN.** AVDDH (2.5 V) / AVDDL (1.2 V) are fed
-   straight from the regulators with no ferrite isolation — under review.
+1. **KSZ analog-supply ferrite — OPEN (must-fix before fab).** AVDDH (2.5 V,
+   7 pins) and AVDDL (1.2 V, 9 pins) are fed straight from the regulators with
+   no ferrite. Microchip HW Design Checklist DS00004151A §3.2 requires a series
+   bead per analog rail (EVB uses 220 Ω 0603, low-DCR ≤0.05 Ω/1.2 V ≤0.1 Ω/
+   2.5 V, ≥400/500 mA). Omitting eats 1000BASE-T compliance margin. Needs a
+   net split (AVDDH/AVDDL onto their own post-ferrite nets) + 2 beads.
 
-### Resolved by the power-tree audit
-- T113 exposed pad → GND — **done** (pad 129 = 6.4 mm EP, grounded).
-- Unused analog rails (VCC-LVDS/HPVCC/TVOUT/TVIN) — **confirmed safe to leave
-  unpowered** per datasheet.
+### Resolved by the datasheet audit
+- **Power tree** — all rails datasheet-verified, no board-killers.
+- **RGMII clock** — floating `RGMII_CLKIN_25M` (PG13) is a **non-issue**: the
+  T113 EMAC self-generates the 125 MHz RGMII TXC internally (`ETCS_INT_GMII`);
+  PG13 is an unused optional ext-clock input, not a 25 MHz ref. Both link
+  clocks (TXC KSZ48↔T113·5, RXC KSZ57↔T113·121) are routed; SYNCLKO strap +
+  pull-up correct. Cleanup only: rename the misnamed `_25M` net, give PG13 a
+  defined level in the DTS. (RGMII **delay** — rgmii-id / KSZ pad-skew — is the
+  software gotcha to handle at bring-up.)
+- **T113 exposed pad → GND** — done (pad 129 = 6.4 mm EP, grounded).
+- **T113 AVCC** — netlist correct at 1.8 V (pinmap doc was wrong, fixed);
+  ferrite/RC filter recommended but optional (low-current analog).
+- **Unused analog rails** (VCC-LVDS/HPVCC/TVOUT/TVIN) — safe to leave unpowered.
 
 ## v1 scope
 
