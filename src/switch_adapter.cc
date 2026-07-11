@@ -68,7 +68,7 @@ class SwitchAdapter : public ProductAdapter {
     return {
         .id = "s5",
         .display_name = "einheit S5",
-        .version = "0.2.0",
+        .version = "0.2.1",
         .banner = "einheit S5 — 5-port managed gigabit PoE switch",
         .prompt = "S5",
     };
