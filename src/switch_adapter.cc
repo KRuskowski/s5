@@ -20,6 +20,7 @@
 
 #include "einheit/cli/command_tree.h"
 #include "einheit/cli/protocol/envelope.h"
+#include "einheit/cli/render/config_tree.h"
 #include "einheit/cli/render/table.h"
 
 namespace einheit::s5 {
@@ -415,6 +416,19 @@ class SwitchAdapter : public ProductAdapter {
       renderer.Out() << "  "
                      << std::string(response.data.begin(),
                                     response.data.end());
+    } else if (wire == "show_config" || wire == "show_diff" ||
+               wire == "show_commit") {
+      // Config surfaces fold into the hierarchical (Junos-style)
+      // view; diff markers keep their colour in the gutter.
+      if (response.data.empty()) {
+        renderer.Out()
+            << "  (no configuration yet — run `configure` then "
+               "`set`)\n";
+        return;
+      }
+      cli::render::RenderConfigTree(
+          std::string(response.data.begin(), response.data.end()),
+          renderer);
     } else {
       RenderKvLines(response, renderer);
     }
