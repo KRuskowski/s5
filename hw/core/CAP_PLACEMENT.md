@@ -30,7 +30,9 @@ rail is by creation order (KSZ section builds before T113).
 | U3 AP2112K-2.5 (KSZ 2.5 V) | **C13** (10 µF out) | at U3 |
 | U4 AP2112K-1.2 (KSZ+T113 1.2 V) | **C14** (10 µF out) | at U4 |
 | AP2112K-1.8 (T113 1.8 V) | **C8, C9, C16** (10 µF) | at the LDO |
-| misc 3.3 V | **C91** (10 µF bulk) · **C95, C96** (100 nF) | at the other 3.3 V loads (flash / watchdog / USB) |
+| 3.3 V rail bulk | **C91** (10 µF) | bulk on VDD_3V3 near the LDO cluster (U3/U4/U12, X≈171/Y≈87) / where VDD_3V3 lands from J9 — not pin-critical |
+| microSD VDD | **C95** (100 nF) | at **J8** microSD VDD pin (X≈175/Y≈104) — SD-card 3.3 V decoupling |
+| flash VCC | **C96** (100 nF) | at **U8** W25N02 flash pin 8 VCC (X≈162/Y≈124) — tight |
 
 ## 3. KSZ9477S (U1) — one cap per power pin
 
