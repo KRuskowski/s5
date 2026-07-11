@@ -26,8 +26,7 @@ rail is by creation order (KSZ section builds before T113).
 
 | Converter | Caps | Place |
 |---|---|---|
-| 0.9 V buck (TLV62569) | **C6, C7** (22 µF out) · **C15** (10 µF) + inductor | tightest loop — Cin at VIN, keep SW→L→Cout small |
-| 0.9 V core bulk | **C90** (10 µF) | at the buck output near the T113 core |
+| 0.9 V buck **U11** (TLV62569) | **C6, C7** (22 µF out) · **C15, C90** (10 µF) + inductor | all four sit AT U11 (top-right strip, X≈186-192 / Y≈72), NOT at the T113. Tightest loop — Cin at VIN, SW→L→Cout small |
 | U3 AP2112K-2.5 (KSZ 2.5 V) | **C13** (10 µF out) | at U3 |
 | U4 AP2112K-1.2 (KSZ+T113 1.2 V) | **C14** (10 µF out) | at U4 |
 | AP2112K-1.8 (T113 1.8 V) | **C8, C9, C16** (10 µF) | at the LDO |
