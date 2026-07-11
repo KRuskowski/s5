@@ -72,6 +72,10 @@ auto Init(const std::string &bus) -> bool {
   return i2c_fd_ >= 0;
 }
 
+auto Available() -> bool {
+  return i2c_fd_ >= 0;
+}
+
 auto GetPortStatus(int port) -> PortPoeStatus {
   PortPoeStatus s;
   s.port = port;

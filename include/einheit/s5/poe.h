@@ -26,6 +26,10 @@ struct PortPoeStatus {
 /// bus: e.g. "/dev/i2c-0"
 auto Init(const std::string &bus) -> bool;
 
+/// Whether Init succeeded — i.e. the PoE bus exists on this box.
+/// Callers must not seed or apply poe.* config paths without it.
+auto Available() -> bool;
+
 /// Get PoE status for a single port (1-5).
 auto GetPortStatus(int port) -> PortPoeStatus;
 

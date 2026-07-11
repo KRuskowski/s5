@@ -243,6 +243,12 @@ auto BuildPlan(const Candidate &candidate)
       }
       plan.ports[seg[1]] = *b;
     } else if (seg.size() == 3 && seg[0] == "poe") {
+      if (!poe::Available()) {
+        // Rejected at validation, before any write, so a PoE-less
+        // box (or a dead bus) never half-applies a candidate.
+        return Fail(ApplyError::ValidationFailed,
+                    "PoE bus unavailable on this box");
+      }
       const auto port = ParsePoePort(seg[1]);
       if (!port) {
         return Fail(ApplyError::ValidationFailed,
@@ -393,10 +399,15 @@ auto S5Backend::ReadRunning() -> Config {
     running[std::format("ports.{}.enabled", name)] =
         st.enabled ? "true" : "false";
   }
-  for (int port = 1; port <= 5; ++port) {
-    const auto st = poe::GetPortStatus(port);
-    running[std::format("poe.{}.enabled", port)] =
-        st.enabled ? "true" : "false";
+  // Only seed poe paths when the bus exists — otherwise every
+  // commit would re-apply phantom poe values and fail mid-apply
+  // on a PoE-less box.
+  if (poe::Available()) {
+    for (int port = 1; port <= 5; ++port) {
+      const auto st = poe::GetPortStatus(port);
+      running[std::format("poe.{}.enabled", port)] =
+          st.enabled ? "true" : "false";
+    }
   }
   return running;
 }
