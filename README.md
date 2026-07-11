@@ -66,17 +66,28 @@ in NAND). Different image pipeline from the firewall (T527 + eMMC + Debian).
 
 - **Software:** v0.1.0, building. Switch adapter (KSZ9477/DSA), backend/service,
   PoE control; migrated to the confd/engine management plane.
-- **Hardware:** both boards placed and **essentially routed** — core heavily
-  routed (~2000 tracks / ~500 vias, 4-layer), power routed via copper pours
-  (16 zones). 3D models aligned for the enclosure. **DRC + fab-prep next.**
+- **Hardware:** core board **routed and DRC-clean**; power routed via copper
+  pours (16 zones). 3D models aligned for the enclosure. Power board being
+  redone (connector change moved the outline).
+- **Power-tree audit (datasheet-verified):** all rails checked against
+  datasheets — VDD-CORE/VDD-SYS 0.9 V, KSZ core 1.2 V / analog 2.5 V / I/O
+  3.3 V, T113 VCC-DRAM fed by internal LDOB (pin 30 → 48/49), DZQ = 240 Ω,
+  both PoE controllers' A3 address straps intentional, buck EN/FB/PG correct.
+  **No board-killers.**
 - **Resolved decisions:** ASIC = KSZ9477 · flash = SPI NAND (W25N02JW) ·
   board interconnect = Samtec PowerStrip (replaced the cable) · mounting M2.5.
 
-### Open hardware items (in-script TODOs)
-1. T113 eLQFP128 **exposed pad → GND** (mandatory — only one dedicated GND pin).
-2. RGMII **25 MHz clock reference** source (KSZ SYNCLKO or crystal).
-3. Unused analog rails (VCC-LVDS/HPVCC/TVOUT/TVIN) — confirm may be left unpowered.
-4. **AVCC ferrite** filtering (per datasheet).
+### Open hardware items
+1. **RGMII 25 MHz clock reference — OPEN.** T113 `RGMII_CLKIN_25M` (pin 125 /
+   PG13) is floating; KSZ `SYNCLKO` (pin 95) is only pulled up, not routed to
+   it. Needs a source wired (SYNCLKO → CLKIN, or external osc) — under review.
+2. **KSZ analog-supply ferrite — OPEN.** AVDDH (2.5 V) / AVDDL (1.2 V) are fed
+   straight from the regulators with no ferrite isolation — under review.
+
+### Resolved by the power-tree audit
+- T113 exposed pad → GND — **done** (pad 129 = 6.4 mm EP, grounded).
+- Unused analog rails (VCC-LVDS/HPVCC/TVOUT/TVIN) — **confirmed safe to leave
+  unpowered** per datasheet.
 
 ## v1 scope
 
