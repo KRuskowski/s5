@@ -246,7 +246,7 @@ U11 = Part(
 U11.ref = 'U11'
 U11[4] += vdd5   # VIN
 U11[2] += gnd
-U11[1] += vdd5   # EN on
+U11[1] += vdd5   # EN pin -- tied high = always enabled. NOT a power feed; shows as VDD_5V in KiCad.
 core_sw = Net('CORE_SW')
 U11[3] += core_sw   # SW
 l = inductor('1uH', 'Inductor_SMD:L_0805_2012Metric')
@@ -552,8 +552,10 @@ def wire_pse_common(u, a3_to_gnd):
   u[2] += pse_reset   # shared active-low reset; STM asserts it to shed PoE
   u[3] += i2c_scl; u[4] += i2c_sda; u[5] += i2c_sda
   u[6] += Net(f'{u.ref}_INT_N')
-  u[23] += gnd if a3_to_gnd else vpse33  # address select
-  u[24] += vpse33     # SHTDWN disabled (kept high on the always-on rail)
+  u[23] += gnd if a3_to_gnd else vpse33  # A3 I2C address strap (GND=0 / vpse33=1), NOT a rail
+  u[24] += vpse33     # SHTDWN pin (active-low) -- tied high = disabled. NOT a power feed;
+  # shows as VDD_3V3_PSE in KiCad. HW fast-shutdown intentionally unused; PoE is shed via
+  # the I2C RESET line (pin 2) instead.
   u[25] += Net(f'{u.ref}_AIN')
   u[26] += Net(f'{u.ref}_AOUT')
 
