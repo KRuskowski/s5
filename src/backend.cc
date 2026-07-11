@@ -4,6 +4,7 @@
 
 #include "einheit/s5/backend.h"
 
+#include <algorithm>
 #include <cctype>
 #include <format>
 #include <map>
@@ -78,6 +79,13 @@ config:
           type: boolean
           default: "true"
           help: "Administrative port state (lan1..lan5, wan)"
+        vlan:
+          type: map
+          key: integer
+          value:
+            type: enum
+            values: [tagged, untagged, pvid, untagged-pvid]
+            help: "802.1Q membership mode for this VID"
 
   poe:
     type: map
@@ -158,6 +166,41 @@ auto Fail(ApplyError code, std::string msg)
   return std::unexpected(Error<ApplyError>{code, std::move(msg)});
 }
 
+/// 802.1Q membership mode of one VID on one port, as the flag pair
+/// `bridge vlan add` takes.
+struct VlanMode {
+  bool untagged = false;
+  bool pvid = false;
+};
+
+auto ParseVlanMode(const std::string &v) -> std::optional<VlanMode> {
+  if (v == "tagged") return VlanMode{false, false};
+  if (v == "untagged") return VlanMode{true, false};
+  if (v == "pvid") return VlanMode{false, true};
+  if (v == "untagged-pvid") return VlanMode{true, true};
+  return std::nullopt;
+}
+
+auto VlanModeName(bool untagged, bool pvid) -> std::string {
+  if (untagged && pvid) return "untagged-pvid";
+  if (untagged) return "untagged";
+  if (pvid) return "pvid";
+  return "tagged";
+}
+
+auto ParseVid(const std::string &s) -> std::optional<int> {
+  if (s.empty() || s.size() > 4) return std::nullopt;
+  int vid = 0;
+  for (char c : s) {
+    if (!std::isdigit(static_cast<unsigned char>(c))) {
+      return std::nullopt;
+    }
+    vid = vid * 10 + (c - '0');
+  }
+  if (vid < 1 || vid > 4094) return std::nullopt;
+  return vid;
+}
+
 /// The candidate regrouped into per-subsystem write plans, so the
 /// apply order is deterministic regardless of map iteration order
 /// (e.g. an interface's dhcp flag is considered together with its
@@ -172,6 +215,10 @@ struct Plan {
   std::vector<std::string> dns;
   std::optional<std::string> ntp_server;
   std::map<std::string, bool> ports;
+  /// Desired VLAN membership per port: vid → mode. A port present
+  /// here owns its full membership set — VIDs on the box but not
+  /// listed are removed on apply.
+  std::map<std::string, std::map<int, VlanMode>> port_vlans;
   struct Poe {
     std::optional<bool> enabled;
     std::optional<int> power_limit_mw;
@@ -242,6 +289,22 @@ auto BuildPlan(const Candidate &candidate)
                     std::format("invalid value at '{}'", path));
       }
       plan.ports[seg[1]] = *b;
+    } else if (seg.size() == 4 && seg[0] == "ports" &&
+               seg[2] == "vlan") {
+      const auto vid = ParseVid(seg[3]);
+      const auto mode = ParseVlanMode(value);
+      if (!SafeToken(seg[1]) || !vid) {
+        return Fail(ApplyError::ValidationFailed,
+                    std::format("'{}': VID must be 1-4094", path));
+      }
+      if (!mode) {
+        return Fail(
+            ApplyError::ValidationFailed,
+            std::format("'{}': expected tagged|untagged|pvid|"
+                        "untagged-pvid",
+                        path));
+      }
+      plan.port_vlans[seg[1]][*vid] = *mode;
     } else if (seg.size() == 3 && seg[0] == "poe") {
       if (!poe::Available()) {
         // Rejected at validation, before any write, so a PoE-less
@@ -360,6 +423,43 @@ auto S5Backend::Apply(const Candidate &candidate)
     }
     applied = true;
   }
+  if (!plan->port_vlans.empty()) {
+    // Reconcile each configured port's membership against the box:
+    // the candidate owns the full set, so stale VIDs are removed
+    // and missing / flag-changed ones (re-)added — `bridge vlan
+    // add` on an existing VID updates its flags.
+    const auto live = dsa::GetVlans();
+    for (const auto &[port, desired] : plan->port_vlans) {
+      for (const auto &entry : live) {
+        if (entry.port != port) continue;
+        if (!desired.contains(entry.vid)) {
+          if (!dsa::DelVlan(port, entry.vid)) {
+            return fail(std::format(
+                "removing VID {} from {} failed", entry.vid, port));
+          }
+          applied = true;
+        }
+      }
+      for (const auto &[vid, mode] : desired) {
+        const auto match = std::find_if(
+            live.begin(), live.end(), [&](const auto &e) {
+              return e.port == port && e.vid == vid;
+            });
+        const bool up_to_date =
+            match != live.end() &&
+            match->untagged == mode.untagged &&
+            match->pvid == mode.pvid;
+        if (up_to_date) continue;
+        if (!dsa::AddVlan(port, static_cast<std::uint16_t>(vid),
+                          mode.untagged, mode.pvid)) {
+          return fail(std::format(
+              "setting VID {} on {} failed (is the port bridged?)",
+              vid, port));
+        }
+        applied = true;
+      }
+    }
+  }
   for (const auto &[port, poe] : plan->poe) {
     if (poe.enabled) {
       if (!poe::SetPortEnabled(port, *poe.enabled)) {
@@ -394,10 +494,21 @@ auto S5Backend::ReadRunning() -> Config {
   if (auto ntp = Trim(sys::GetNtpStatus().server); SafeToken(ntp)) {
     running["ntp.server"] = ntp;
   }
-  for (const auto &name : dsa::DiscoverPorts()) {
+  const auto ports = dsa::DiscoverPorts();
+  for (const auto &name : ports) {
     const auto st = dsa::GetPortStatus(name);
     running[std::format("ports.{}.enabled", name)] =
         st.enabled ? "true" : "false";
+  }
+  for (const auto &v : dsa::GetVlans()) {
+    // Only switch ports — `bridge vlan show` also lists the bridge
+    // device itself.
+    if (std::find(ports.begin(), ports.end(), v.port) ==
+        ports.end()) {
+      continue;
+    }
+    running[std::format("ports.{}.vlan.{}", v.port, v.vid)] =
+        VlanModeName(v.untagged, v.pvid);
   }
   // Only seed poe paths when the bus exists — otherwise every
   // commit would re-apply phantom poe values and fail mid-apply
