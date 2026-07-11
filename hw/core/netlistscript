@@ -51,6 +51,7 @@ _rref = [0]
 _lref = [0]
 _qref = [0]
 _ledref = [0]
+_fbref = [0]
 
 def cap(value, fp='Capacitor_SMD:C_0402_1005Metric'):
   _cref[0] += 1
@@ -87,6 +88,22 @@ def inductor(value, fp='Inductor_SMD:L_1210_3225Metric'):
     ])
   l.ref = f'L{_lref[0]}'
   return l
+
+def ferrite(value='220R@100MHz', fp='Inductor_SMD:L_0603_1608Metric'):
+  """Series ferrite bead (FB prefix). 220R@100MHz 0603, low DCR. Isolates the
+  KSZ analog supplies (AVDDH/AVDDL) from the digital rails per Microchip HW
+  Design Checklist DS00004151A section 3.2. Pick a bead with DCR <=0.05R (1.2V)
+  / <=0.1R (2.5V) rated >=500mA/400mA when sourcing."""
+  _fbref[0] += 1
+  fb = Part(
+    tool=SKIDL, name='FerriteBead', ref_prefix='FB',
+    dest=NETLIST, value=value, footprint=fp,
+    pins=[
+      Pin(num='1', name='1', func=Pin.types.PASSIVE),
+      Pin(num='2', name='2', func=Pin.types.PASSIVE),
+    ])
+  fb.ref = f'FB{_fbref[0]}'
+  return fb
 
 def led(value='LED'):
   """Status LED -- Osram Mini TOPLED Lx M676 (under the 1278.1004 light
@@ -295,28 +312,43 @@ U1 = Part(
   ])
 U1.ref = 'U1'
 
-# KSZ9477S power pins
-for p in [3, 14, 19, 30, 36, 41, 114, 119, 124]:  # AVDDL 1.2
-  U1[p] += vdd12
-for p in [10, 22, 33, 44, 111, 122, 128]:          # AVDDH 2.5
-  U1[p] += vdd25
-for p in [11, 23, 45, 56, 66, 70, 87, 104, 110]:   # DVDDL 1.2
+# KSZ9477S power pins.
+# The analog supplies AVDDH (2.5V PHY) and AVDDL (1.2V analog core) are fed
+# through series ferrite beads off the digital rails, per Microchip HW Design
+# Checklist DS00004151A sec 3.2 ("a series ferrite bead should be placed between
+# the analog supply and the board supply"). Digital/SGMII rails (DVDDL, VDDLS,
+# VDDHS, VDDIO) stay directly on the shared rails.
+avddh = Net('KSZ_AVDDH')   # 2.5V analog PHY, post-ferrite from VDD_2V5
+avddl = Net('KSZ_AVDDL')   # 1.2V analog core, post-ferrite from VDD_1V2
+fb = ferrite(); fb[1] += vdd25; fb[2] += avddh   # FB1: VDD_2V5 -> AVDDH
+fb = ferrite(); fb[1] += vdd12; fb[2] += avddl   # FB2: VDD_1V2 -> AVDDL
+for p in [3, 14, 19, 30, 36, 41, 114, 119, 124]:  # AVDDL 1.2 (analog, beaded)
+  U1[p] += avddl
+for p in [10, 22, 33, 44, 111, 122, 128]:          # AVDDH 2.5 (analog, beaded)
+  U1[p] += avddh
+for p in [11, 23, 45, 56, 66, 70, 87, 104, 110]:   # DVDDL 1.2 (digital)
   U1[p] += vdd12
 for p in [61, 68, 99]:                              # VDDIO 3.3
   U1[p] += vdd33
-for p in [71, 84]:                                  # VDDLS 1.2
+for p in [71, 84]:                                  # VDDLS 1.2 (SGMII)
   U1[p] += vdd12
-for p in [72, 83]:                                  # VDDHS 2.5
+for p in [72, 83]:                                  # VDDHS 2.5 (SGMII)
   U1[p] += vdd25
 for p in [46, 47, 69, 75, 77, 80, 107, 109, 123, 129]:  # GND
   U1[p] += gnd
 for i in range(1, 65):                              # EP segments
   U1[f'E_{i}'] += gnd
 
-# KSZ decoupling: 9x2.5V, 20x1.2V, 3x3.3V
-decouple(vdd25, gnd, 9)
-decouple(vdd12, gnd, 20)
-decouple(vdd33, gnd, 3)
+# KSZ decoupling: 0.1uF per power pin, on the same (post-ferrite) net as the pin
+# it serves, plus 22uF low-ESR ceramic bulk on each beaded analog rail at the
+# device (per checklist). Total 0.1uF count unchanged (32): now split by rail.
+decouple(avddh, gnd, 7)    # 7 AVDDH pins
+decouple(avddl, gnd, 9)    # 9 AVDDL pins
+decouple(vdd25, gnd, 2)    # 2 VDDHS pins
+decouple(vdd12, gnd, 11)   # 9 DVDDL + 2 VDDLS
+decouple(vdd33, gnd, 3)    # 3 VDDIO pins
+c = cap('22uF', 'Capacitor_SMD:C_0805_2012Metric'); c[1] += avddh; c[2] += gnd
+c = cap('22uF', 'Capacitor_SMD:C_0805_2012Metric'); c[1] += avddl; c[2] += gnd
 
 # KSZ crystal 25MHz
 Y1 = Part(
