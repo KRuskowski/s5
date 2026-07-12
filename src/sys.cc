@@ -43,7 +43,7 @@ auto GetUptime() -> std::string {
 
 auto GetMemInfo() -> MemInfo {
   MemInfo info;
-  std::ifstream f("/proc/meminfo");
+  std::ifstream f(util::FsPath("/proc/meminfo"));
   std::string line;
   while (std::getline(f, line)) {
     std::uint64_t val = 0;
@@ -128,7 +128,7 @@ auto SetInterfaceDhcp(const std::string &iface) -> bool {
 
 auto GetDnsServers() -> std::vector<std::string> {
   std::vector<std::string> servers;
-  std::ifstream f("/etc/resolv.conf");
+  std::ifstream f(util::FsPath("/etc/resolv.conf"));
   std::string line;
   while (std::getline(f, line)) {
     if (line.starts_with("nameserver ")) {
@@ -185,7 +185,7 @@ auto SetNtpServer(const std::string &server) -> bool {
 
 auto GetUsers() -> std::vector<UserInfo> {
   std::vector<UserInfo> users;
-  std::ifstream f("/etc/passwd");
+  std::ifstream f(util::FsPath("/etc/passwd"));
   std::string line;
   while (std::getline(f, line)) {
     // root:x:0:0:root:/root:/usr/bin/einheit_s5

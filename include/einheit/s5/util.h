@@ -6,9 +6,27 @@
 #define EINHEIT_S5_UTIL_H_
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace einheit::s5::util {
+
+/// Signature of the shell runner behind RunCmd.
+using CmdRunner = std::function<std::string(const std::string &)>;
+
+/// Replace the shell runner. Tests inject a fake box that records
+/// mutations and serves canned command output; passing an empty
+/// function restores the real popen runner.
+auto SetCmdRunner(CmdRunner runner) -> void;
+
+/// Root prefixed onto every file path the helpers touch (/sys,
+/// /proc, /etc). Tests point this at a scratch tree so reads and
+/// writes hit the fake box instead of the machine; empty (the
+/// default) means the real filesystem.
+auto SetFsRoot(std::string root) -> void;
+
+/// `path` under the configured filesystem root.
+auto FsPath(const std::string &path) -> std::string;
 
 /// Run a shell command and return stdout.
 auto RunCmd(const std::string &cmd) -> std::string;

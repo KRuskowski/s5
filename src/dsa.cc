@@ -19,7 +19,7 @@ using util::ReadUint;
 using util::RunCmd;
 
 auto IsDsaPort(const std::string &name) -> bool {
-  auto path = "/sys/class/net/" + name + "/dsa";
+  auto path = util::FsPath("/sys/class/net/" + name + "/dsa");
   return fs::exists(path) || fs::is_symlink(path);
 }
 
@@ -27,9 +27,9 @@ auto IsDsaPort(const std::string &name) -> bool {
 
 auto DiscoverPorts() -> std::vector<std::string> {
   std::vector<std::string> ports;
-  if (!fs::exists("/sys/class/net")) return ports;
+  if (!fs::exists(util::FsPath("/sys/class/net"))) return ports;
   for (const auto &entry :
-       fs::directory_iterator("/sys/class/net")) {
+       fs::directory_iterator(util::FsPath("/sys/class/net"))) {
     auto name = entry.path().filename().string();
     // DSA ports have a "dsa" symlink or start with "lan"/"wan".
     if (IsDsaPort(name) ||
