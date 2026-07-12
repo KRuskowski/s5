@@ -372,7 +372,8 @@ LCSC = {
   'D2': 'C112551',   # BZX84C12 zener
   'D3': 'C2848695',  # SS56 Schottky
   'D4': 'C5361358',  # PMEG10010ELR-QX
-  'FB1': 'C5125746', # Coilcraft XAL1010-222 boost inductor
+  'FB1': 'C5125746', # Coilcraft XAL1010-222 input inductor (2.2uH)
+  'L2': 'C3911775',  # Coilcraft XAL1510-333 buck inductor (33uH) -- confirm on LCSC
 }
 for _p in default_circuit.parts:
   if _p.ref in LCSC:
