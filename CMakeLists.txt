@@ -65,6 +65,11 @@ if(EINHEIT_S5_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     gtest_main
   )
   add_test(NAME test_s5_backend COMMAND test_s5_backend)
+  # Operator-facing behaviour on a real pty (completion menu,
+  # Ctrl-C regime, colour detection).
+  add_test(NAME test_s5_pty
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/test/pty_suite.py
+            $<TARGET_FILE:einheit_s5>)
 endif()
 
 # ------------------------------------------------------------------

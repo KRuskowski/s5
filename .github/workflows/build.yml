@@ -1,0 +1,74 @@
+name: build-and-test
+
+# The cli framework is consumed as a sibling checkout
+# (add_subdirectory(../cli)); EINHEIT_CLI_TOKEN must be a repo
+# secret with read access to einheitdev/cli.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: s5
+
+      - uses: actions/checkout@v4
+        with:
+          repository: einheitdev/cli
+          token: ${{ secrets.EINHEIT_CLI_TOKEN }}
+          path: cli
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libyaml-cpp-dev pkg-config cmake ninja-build clang \
+            python3 iputils-ping
+
+      - name: Configure
+        run: cmake -S s5 -B s5/build -G Ninja
+
+      - name: Build
+        run: cmake --build s5/build --parallel
+
+      - name: Test (unit + pty)
+        run: ctest --test-dir s5/build --output-on-failure
+
+  cross-arm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: s5
+
+      - uses: actions/checkout@v4
+        with:
+          repository: einheitdev/cli
+          token: ${{ secrets.EINHEIT_CLI_TOKEN }}
+          path: cli
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake ninja-build \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
+      - name: Configure (armhf, static)
+        run: >
+          cmake -S s5 -B s5/build-arm -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/s5/cmake/arm-linux-gnueabihf.cmake
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build s5/build-arm --parallel
+
+      - name: Static binary sanity
+        run: |
+          file s5/build-arm/einheit_s5 | grep -q "statically linked"
+          file s5/build-arm/einheit_s5 | grep -q "ARM"
