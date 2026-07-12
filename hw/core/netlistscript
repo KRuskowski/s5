@@ -122,10 +122,14 @@ def led(value='LED'):
   return d
 
 def nfet(ref_des):
-  """N-channel MOSFET in SOT-223: pin 1=G, 2=D(tab), 3=S."""
+  """TPS23861 PoE pass FET -- Diodes DMN10H220LE, SOT-223 (pin 1=G, 2=D/tab,
+  3=S). 100V / 120mR / avalanche-rated 12mJ: meets TI's BVDSS>=100V, Rds
+  50-150mR spec. SOT-223 is adequate because the TPS23861 dual-slope foldback
+  bounds the inrush pulse to <1mJ. Fallback = onsemi FDMC3612 (LCSC C455160,
+  needs a Power-33 footprint). Confirm DMN10H220LE LCSC# before order."""
   _qref[0] += 1
   q = Part(
-    tool=SKIDL, name='NMOS', ref_prefix='Q',
+    tool=SKIDL, name='DMN10H220LE', ref_prefix='Q',
     dest=NETLIST,
     footprint='Package_TO_SOT_SMD:SOT-223-3_TabPin2',
     pins=[
@@ -891,13 +895,15 @@ decouple(vdd33, gnd, 1)
 stm_wdi = Net('STM_WDI')
 
 # ============================================================
-# W25N02 SPI NAND boot flash (256MB) -- SOIC-8
-# Shared SPI0 bus; flash CS on T113 PC3 (SPI0-CS0),
-# KSZ CS on PB4 (GPIO).
+# W25N02 SPI NAND boot flash (256MB) -- WSON-8 8x6mm.
+# Part: W25N02KWZEIR (LCSC C17401814) -- 1.8V, JLC-stocked; footprint-compatible
+# upgrade over the thin-stock W25N02JWZEIF (JW is WSON-8 8x6 too, never SOIC-8).
+# Footprint imported from the JLC part (chips:WSON-8_L8.0...) so the land pattern
+# matches JLC pick-and-place. Shared SPI0 bus; CS on T113 PC3 (SPI0-CS0).
 # ============================================================
 U8 = Part(
-  tool=SKIDL, name='W25N02JWZEIF', ref_prefix='U', dest=NETLIST,
-  footprint='Package_SO:SOIC-8_3.9x4.9mm_P1.27mm',
+  tool=SKIDL, name='W25N02KWZEIR', ref_prefix='U', dest=NETLIST,
+  footprint='chips:WSON-8_L8.0-W6.0-P1.27-TL-EP-1',
   pins=[
     Pin(num='1', name='CS',   func=Pin.types.INPUT),
     Pin(num='2', name='DO',   func=Pin.types.OUTPUT),
@@ -907,8 +913,10 @@ U8 = Part(
     Pin(num='6', name='CLK',  func=Pin.types.INPUT),
     Pin(num='7', name='HOLD', func=Pin.types.INPUT),
     Pin(num='8', name='VCC',  func=Pin.types.PWRIN),
+    Pin(num='9', name='EP',   func=Pin.types.PASSIVE),
   ])
 U8.ref = 'U8'
+U8[9] += gnd   # WSON exposed pad -> GND (datasheet: float or GND, no vias)
 # flash_cs is wired to T113 SPI0-CS0 (PC3) in the T113 section.
 U8[1] += flash_cs
 U8[2] += spi_miso

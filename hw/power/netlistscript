@@ -250,7 +250,7 @@ ho_g = Net('BOOST_HO'); qh_gate = Net('QH_GATE')
 r = res('2.2R'); r[1] += ho_g; r[2] += qh_gate; QH[4] += qh_gate; U1[19] += ho_g
 # Bootstrap: DBST VCC->BST (cathode=BST), CBST BST->SW
 bst_net = Net('BST_BOOST'); U1[20] += bst_net
-DBST = two_pin('PMEG10010ELR-QX', 'D4', 'Diode_SMD:D_SOD-123F')  # 100V Schottky LCSC C5361358
+DBST = two_pin('PMEG10010ELR-QX', 'D4', 'Diode_SMD:Nexperia_CFP3_SOD-123W')  # 100V Schottky, SOD-123W(CFP3) LCSC C5361358
 DBST[1] += bst_net; DBST[2] += boost_vcc
 c = cap('100nF'); c[1] += bst_net; c[2] += boost_sw
 # Cap VOLTAGE RATINGS (MLCC derate ~2x DC working -- lose ~50% C at rated V):

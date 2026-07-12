@@ -9,14 +9,14 @@ Two buckets: **JLC must place** (fine-pitch / leadless — infeasible by hand) a
 
 ---
 
-## ⚠️ Silent killers — verify these BEFORE ordering
+## Silent killers — RESOLVED (all four fixed in the netlist)
 
-| Item | Board | Problem |
+| Item | Board | Resolution |
 |---|---|---|
-| **W25N02JW flash U8** | core | Footprint is `SOIC-8_3.9x4.9mm` (150-mil narrow), but the stocked `W25N02JWZEIF` (C2962014) is **WSON-8-EP** — and standard 2 Gb SPI-NAND SOIC is 208-mil *wide* anyway. **Footprint almost certainly wrong.** Also OOS / pre-order. |
-| **PMEG10010 D4** | power | Footprint `SOD-123F`, but stocked part (C179426) is **SOD-123W**. Verify land pattern. |
-| **Osram M676 LEDs D3–D6** | core | Not in JLC library. Everlight 19-21x substitutes use a **smaller 0603 land that won't match** the Mini-TOPLED footprint → hand-solder Osram, or change footprint to a JLC LED. |
-| **Q1–Q5 N-FET** | core | Netlist has a **generic placeholder** ("NMOS", SOT-223). Pick a real part: **DMN3032LE-13 = C156338** (30 V, logic-level, Extended). |
+| **Flash U8** | core | Was `SOIC-8` (wrong — W25N02JW is only WSON-8 8×6). Now **W25N02KWZEIR (C17401814)**, 1.8 V, in-stock; footprint imported from the JLC part → `chips:WSON-8_L8.0-W6.0-P1.27-TL-EP-1`, EP→GND. **U8 needs re-place + reroute** (WSON ≠ SOIC). |
+| **PMEG10010 D4** | power | Footprint → `Nexperia_CFP3_SOD-123W` (correct package). |
+| **Q1–Q5 PoE FET** | core | Was generic 30 V placeholder — **wrong, they sit on the 54 V PoE bus.** Now **DMN10H220LE** (100 V, avalanche-rated, SOT-223, no footprint change). ⚠️ Confirm its LCSC# on lcsc.com; verified fallback = **FDMC3612 (C455160)** if not stocked (needs Power-33 footprint). |
+| **Osram M676 LEDs D3–D6** | core | **Kept — the 1278.1004 light guide requires Osram Mini-TOPLED.** Hand-soldered, mark do-not-place for JLC. No substitutes. |
 
 ---
 
@@ -31,7 +31,7 @@ Two buckets: **JLC must place** (fine-pitch / leadless — infeasible by hand) a
 | U9,U13 | TPS23861PW | **C2872514** | Ext | OOS at LCSC; need ×6 — pre-order |
 | U11 | TLV62569PDDCR | **C398365** | Ext | clean |
 | U19 | STM32G071CBT6 | **C432212** | Ext | clean |
-| U8 | W25N02JWZEIF | **C2962014** | Ext | ⚠️ package/footprint (above) + OOS |
+| U8 | W25N02KWZEIR | **C17401814** | Ext | WSON-8 8×6, in stock; reroute needed |
 | U10 | TPS3823-33DBVR | **C7719** | Ext | clean |
 | U18,U20 | TPS7B6933QDCYRQ1 | **C108471** | Ext | verified ✓ |
 | U3 | AP2112K-2.5 | **C176945** | Ext | stock ~230 |
@@ -48,7 +48,7 @@ Two buckets: **JLC must place** (fine-pitch / leadless — infeasible by hand) a
 | Y2 | 24 MHz xtal | **C2682776** | Pref | clean |
 | Y3 | 32.768 kHz xtal | **C97606** | Pref | 12.5 pF; lower-CL sib C97605/C97604 |
 | Q60 | 2N7002 | **C8545** | Basic | std-threshold — use 2N7002K if driven at 3.3 V |
-| Q1–Q5 | N-FET SOT-223 → **DMN3032LE-13** | **C156338** | Ext | replaces placeholder (above) |
+| Q1–Q5 | PoE pass FET **DMN10H220LE** (100 V) | LCSC UNVERIFIED | Ext | confirm C#; fallback FDMC3612 C455160 |
 | SW2 | tactile KMR231GLFS | **C99271** | Basic | optional-JLC |
 | J8 | microSD 104031-0811 | **C585350** | Ext | optional-JLC |
 
@@ -80,7 +80,7 @@ Two buckets: **JLC must place** (fine-pitch / leadless — infeasible by hand) a
 | Q2,Q3 | BSC057N08NS3G | **C534354** | Ext | PowerPAK SO-8, 80 V |
 | Q1 | SQJ409EP | **C727776** | Ext | verified ✓ PowerPAK SO-8L |
 | D2 | BZX84C12 | **C112551** | Ext | |
-| D4 | PMEG10010ELRX | **C179426** | Ext | ⚠️ SOD-123W vs footprint (above) |
+| D4 | PMEG10010ELR-QX | **C5361358** | Ext | footprint → SOD-123W (fixed) |
 | D1 | SMBJ33A (SMB) | **C78419** | Ext | |
 | D3 | SS56 (SMC) | **C2848695** | Ext | note SS56 is often SMA; this is the SMC listing |
 | FB1 | Coilcraft XAL1010-222MED | **C5125746** | Ext | verified ✓; stock ~287 — pre-order |
