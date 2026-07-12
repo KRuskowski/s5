@@ -171,9 +171,14 @@ auto GetNtpStatus() -> NtpStatus {
 }
 
 auto SetNtpServer(const std::string &server) -> bool {
-  RunCmd("killall ntpd 2>/dev/null");
-  auto out = RunCmd("ntpd -p " + server + " 2>&1");
-  return true;
+  RunCmd("pkill -x ntpd 2>/dev/null; killall ntpd 2>/dev/null");
+  // ntpd daemonizes on launch; the apply only counts if the daemon
+  // is actually up afterwards — a box without ntpd must fail the
+  // commit, not silently pretend.
+  const auto out = RunCmd("ntpd -p " + server +
+                          " 2>/dev/null; sleep 1; "
+                          "pidof ntpd 2>/dev/null");
+  return !out.empty();
 }
 
 // ── Users ───────────────────────────────────────────────────

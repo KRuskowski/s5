@@ -7,7 +7,9 @@
 # negative paths (validation rejects, fail-before-write, strict
 # arity). Requires a DISPOSABLE target prepared like the s5-test
 # VM: einheit_s5 installed, lan1..lan4 enslaved to a
-# vlan_filtering bridge br0, lan5 left routed, passwordless sudo.
+# vlan_filtering bridge br0, lan5 left routed, passwordless sudo,
+# and ntpd_sim.c installed as /usr/local/sbin/ntpd (Debian has no
+# busybox ntpd applet; see that file's header).
 # NEVER run against a production switch — it rewrites hostname,
 # DNS and interface state (and restores test defaults at the end).
 #
