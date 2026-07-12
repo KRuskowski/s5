@@ -15,7 +15,7 @@ Status legend: ✅ confirmed on JLC · 🔎 verify C# / live stock on JLC · ✏
 | Q50 | reverse-polarity P-FET | **Infineon BSP315P** (alt onsemi NVF2955) | 🔎 | SOT-223 | -60V, ~55mΩ. Matches current footprint. |
 | Q60 | relay-coil driver | **2N7002** (Nexperia/onsemi) | JLC Basic | SOT-23 | logic-level, 60V/300mA; coil is ~6mA. |
 | U21 | DI opto-isolator | **EL357N(C)** or LTV-357T | JLC Basic | SOP-4 (SMD) | ✏️ was PC817 DIP — use SMD for JLC. |
-| K1 | fault relay | **Hongfa HFD4/24-S** | C190593 | SMD, DPDT | ✅ 24V coil (~6mA), 2A Form-C; use one pole. ✏️ redefine pins to footprint. |
+| K1 | fault relay | **Hongfa HFD23-024-1ZS** | C32381 | THT, 1 Form-C | 24V coil, 2A. ⚠️ THROUGH-HOLE (JLC selective/hand solder) + was OOS at check. Prior C190593 was the WRONG part (HFD4/24-S). Matches netlist Relay_HFD23_1C_THT. |
 | U10 | STM watchdog | TI **TPS3823-33** | 🔎 | SOT-23-5 | already real. |
 | U15/U16 | temp sensors | ADI **DS18B20** | 🔎 | TO-92 or SOIC-8 | already real. Pick SMD (SOIC) for JLC if hot-spot allows. |
 | U17 | humidity | Sensirion **SHT40-AD1B** | 🔎 | DFN-4 | already real (extended). |
