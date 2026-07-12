@@ -356,6 +356,29 @@ for _mh in ('MH1', 'MH2', 'MH3', 'MH4'):
   mh[1] += earth        # frame -> PE (input earth -> chassis)
 
 # ============================================================
+# LCSC part numbers for the JLC assembly BOM (see hw/JLC_BOM.md).
+# Blank on purpose: L1 (SRP1245A not in JLC -> swap to SRP1265A C2041465 or
+# hand-solder), F1 (0452012 Slo-Blo not in JLC), RV1 (DNP), J1/J2 (hand-solder),
+# RS (5m sense R -- pick at order). Jellybean R/C auto-match by value.
+# ============================================================
+LCSC = {
+  'U1': 'C77241',    # LM5122 boost
+  'U2': 'C31966',    # TPS54560 buck
+  'U3': 'C6186',     # AMS1117-3.3
+  'Q1': 'C727776',   # SQJ409EP reverse-polarity P-FET
+  'Q2': 'C534354',   # BSC057N08NS3G
+  'Q3': 'C534354',   # BSC057N08NS3G
+  'D1': 'C78419',    # SMBJ33A TVS
+  'D2': 'C112551',   # BZX84C12 zener
+  'D3': 'C2848695',  # SS56 Schottky
+  'D4': 'C5361358',  # PMEG10010ELR-QX
+  'FB1': 'C5125746', # Coilcraft XAL1010-222 boost inductor
+}
+for _p in default_circuit.parts:
+  if _p.ref in LCSC:
+    _p.fields['LCSC'] = LCSC[_p.ref]
+
+# ============================================================
 # Generate netlist
 # ============================================================
 generate_netlist(file_='netlist_s5power.net')

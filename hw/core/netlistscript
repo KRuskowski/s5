@@ -103,6 +103,7 @@ def ferrite(value='220R@100MHz', fp='Inductor_SMD:L_0603_1608Metric'):
       Pin(num='2', name='2', func=Pin.types.PASSIVE),
     ])
   fb.ref = f'FB{_fbref[0]}'
+  fb.fields['LCSC'] = 'C88988'   # Murata BLM18SG221 220R@100MHz, 40mR/2.5A
   return fb
 
 def led(value='LED'):
@@ -1347,6 +1348,47 @@ r = res('1M'); r[1] += gnd; r[2] += earth                 # bleed / DC leak path
 c = cap('4.7nF', 'Capacitor_SMD:C_1206_3216Metric')       # HF bond (use Y-rated)
 c[1] += gnd; c[2] += earth
 r = res('0R'); r[1] += gnd; r[2] += earth                 # hard-bond link (fit/DNP)
+
+# ============================================================
+# LCSC part numbers for the JLC assembly BOM (see hw/JLC_BOM.md).
+# Named parts only -- jellybean R/C/L are JLC Basic and auto-match by value.
+# FB (C88988) and Q1-Q5 (C50314242) get theirs in their helpers.
+# Not listed (blank on purpose): Osram LEDs D3-D6 + connectors J7/J9/J10/J11/J12
+# = hand-soldered / do-not-place for JLC.
+# ============================================================
+LCSC = {
+  'U1': 'C631685',    # KSZ9477STXI
+  'U3': 'C176945',    # AP2112K-2.5
+  'U4': 'C460310',    # AP2112K-1.2
+  'U7': 'C5197687',   # T113-S3
+  'U8': 'C17401814',  # W25N02KWZEIR flash
+  'U9': 'C2872514',   # TPS23861
+  'U10': 'C7719',     # TPS3823-33
+  'U11': 'C398365',   # TLV62569PDDCR
+  'U12': 'C176944',   # AP2112K-1.8
+  'U13': 'C2872514',  # TPS23861
+  'U15': 'C376006',   # DS18B20 (TO-92, hand/selective)
+  'U16': 'C376006',   # DS18B20
+  'U17': 'C2848306',  # SHT40-AD1B
+  'U18': 'C108471',   # TPS7B6933QDCYRQ1
+  'U19': 'C432212',   # STM32G071CBT6
+  'U20': 'C108471',   # TPS7B6933QDCYRQ1
+  'U21': 'C29981',    # EL357N
+  'Y1': 'C843258',    # 25MHz crystal
+  'Y2': 'C2682776',   # 24MHz crystal
+  'Y3': 'C97606',     # 32.768kHz crystal
+  'Q60': 'C8545',     # 2N7002
+  'D2': 'C2128',      # 1N4148 SOD-323
+  'D52': 'C22629', 'D53': 'C22629',   # BAT54
+  'D54': 'C81598', 'D56': 'C81598',   # 1N4148W
+  'D55': 'C83325', 'D57': 'C83325',   # SMBJ33CA
+  'SW2': 'C99271',    # C&K KMR2 tactile
+  'J8': 'C585350',    # microSD (SMT; JLC-optional)
+  'K1': 'C32381',     # HFD23-024-1ZS relay (THT)
+}
+for _p in default_circuit.parts:
+  if _p.ref in LCSC:
+    _p.fields['LCSC'] = LCSC[_p.ref]
 
 # ============================================================
 # Generate netlist

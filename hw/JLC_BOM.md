@@ -4,6 +4,12 @@ Cross-referenced against the JLC/LCSC assembly library on **2026-07-12**.
 **Stock is point-in-time — re-confirm every C# in the JLC cart before ordering.**
 Selection rule (per Karl): availability/longevity first, cost second.
 
+**LCSC# for every named part is now set as an `LCSC` field in both netlist
+scripts** (core: 38 parts, power: 11), so the Fabrication Toolkit BOM
+auto-populates on import. Jellybean R/C/L carry no C# → JLC Basic auto-match by
+value. Blank named parts = the hand-add pile (Osram LEDs, Samtec/Phoenix, USB-C,
+L1/F1 on the power board).
+
 Two buckets: **JLC must place** (fine-pitch / leadless — infeasible by hand) and
 **hand-add** (connectors, magnetics, THT — Karl self-sources & solders).
 
