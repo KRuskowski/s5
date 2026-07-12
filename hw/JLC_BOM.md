@@ -15,7 +15,7 @@ Two buckets: **JLC must place** (fine-pitch / leadless — infeasible by hand) a
 |---|---|---|
 | **Flash U8** | core | Was `SOIC-8` (wrong — W25N02JW is only WSON-8 8×6). Now **W25N02KWZEIR (C17401814)**, 1.8 V, in-stock; footprint imported from the JLC part → `chips:WSON-8_L8.0-W6.0-P1.27-TL-EP-1`, EP→GND. **U8 needs re-place + reroute** (WSON ≠ SOIC). |
 | **PMEG10010 D4** | power | Footprint → `Nexperia_CFP3_SOD-123W` (correct package). |
-| **Q1–Q5 PoE FET** | core | Was generic 30 V placeholder — **wrong, they sit on the 54 V PoE bus.** Now **DMN10H220LE** (100 V, avalanche-rated, SOT-223, no footprint change). ⚠️ Confirm its LCSC# on lcsc.com; verified fallback = **FDMC3612 (C455160)** if not stocked (needs Power-33 footprint). |
+| **Q1–Q5 PoE FET** | core | Was generic 30 V placeholder — **wrong, they sit on the 54 V PoE bus.** Now **DMN10H220LE-TP** (100 V / 80 mΩ, avalanche-rated, SOT-223, no footprint change), **C50314242** verified stocked. |
 | **Osram M676 LEDs D3–D6** | core | **Kept — the 1278.1004 light guide requires Osram Mini-TOPLED.** Hand-soldered, mark do-not-place for JLC. No substitutes. |
 
 ---
@@ -48,7 +48,7 @@ Two buckets: **JLC must place** (fine-pitch / leadless — infeasible by hand) a
 | Y2 | 24 MHz xtal | **C2682776** | Pref | clean |
 | Y3 | 32.768 kHz xtal | **C97606** | Pref | 12.5 pF; lower-CL sib C97605/C97604 |
 | Q60 | 2N7002 | **C8545** | Basic | std-threshold — use 2N7002K if driven at 3.3 V |
-| Q1–Q5 | PoE pass FET **DMN10H220LE** (100 V) | LCSC UNVERIFIED | Ext | confirm C#; fallback FDMC3612 C455160 |
+| Q1–Q5 | PoE pass FET **DMN10H220LE-TP** (100 V / 80 mΩ) | **C50314242** ✓ | Ext | verified stocked; LCSC field set in netlist |
 | SW2 | tactile KMR231GLFS | **C99271** | Basic | optional-JLC |
 | J8 | microSD 104031-0811 | **C585350** | Ext | optional-JLC |
 

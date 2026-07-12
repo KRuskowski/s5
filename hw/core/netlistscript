@@ -138,6 +138,8 @@ def nfet(ref_des):
       Pin(num='3', name='S', func=Pin.types.PASSIVE),
     ])
   q.ref = ref_des
+  # DMN10H220LE-TP, SOT-223, 100V/80mR@10V/6.5A -- verified JLC-stocked.
+  q.fields['LCSC'] = 'C50314242'
   return q
 
 def decouple(rail, gnd, n, value='100nF',
