@@ -256,16 +256,17 @@ c = cap('100nF'); c[1] += bst_net; c[2] += boost_sw
 # Cap VOLTAGE RATINGS (MLCC derate ~2x DC working -- lose ~50% C at rated V):
 #   54V VBUS -> 100V   |   24V VIN -> 63V min (survive ~48V TVS clamp)
 #   5V -> 16V          |   VCC/bootstrap -> 16-25V
-# Output caps on 54V rail: 100V/1210 (C49326812).
+# Output caps on 54V rail: 4.7uF/100V/1210 (C337978) x5 ~= 23uF.
+# 10uF/100V/1210 ceramic isn't sourceable (dead CV bucket); all-ceramic for
+# longevity (no aluminum-elec on an always-on industrial rail).
+for _ in range(5):
+  c = cap('4.7uF/100V', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vbus54; c[2] += gnd
+  c.fields['LCSC'] = 'C337978'
+# 24V input bulk: 10uF/63V/1210 (C6120029, ~11.6k stock). 63V survives the ~48V
+# TVS clamp; the input never needs 100V. (22uF/63V/1206 doesn't exist either.)
 for _ in range(3):
-  c = cap('10uF/100V', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vbus54; c[2] += gnd
-  c.fields['LCSC'] = 'C49326812'
-# 24V input bulk: also 10uF/100V/1210. 22uF/63V doesn't exist in 1206 (63V MLCC
-# tops out ~4.7uF there); 10uF/100V derates far less at 24V bias, so 3x gives
-# comparable effective bulk with more voltage margin.
-for _ in range(3):
-  c = cap('10uF/100V', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vin24; c[2] += gnd
-  c.fields['LCSC'] = 'C49326812'
+  c = cap('10uF/63V', 'Capacitor_SMD:C_1210_3225Metric'); c[1] += vin24; c[2] += gnd
+  c.fields['LCSC'] = 'C6120029'
 # (PWR_GOOD dropped: the LM5122 has no PG pin and the digital board senses the
 # rails it receives directly, so no power-good signal is generated here.)
 
