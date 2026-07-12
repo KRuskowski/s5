@@ -151,12 +151,22 @@ auto SetDnsServers(const std::vector<std::string> &servers)
 
 auto GetNtpStatus() -> NtpStatus {
   NtpStatus st;
-  auto out = RunCmd("ntpq -p 2>/dev/null || "
-                    "busybox ntpd -q 2>&1 | head -1");
-  st.server = out.empty() ? "not configured" : out;
   // Rough check — if ntpd is running, consider synced.
-  auto ps = RunCmd("pidof ntpd 2>/dev/null");
-  st.synced = !ps.empty();
+  st.synced = !RunCmd("pidof ntpd 2>/dev/null").empty();
+  // Recover the configured server from the running daemon's
+  // command line (`ntpd -p <server>`): busybox ntpd has no query
+  // interface, and probing optional tools here used to leak their
+  // shell error text into the displayed value.
+  auto cmdline = RunCmd(
+      "p=$(pidof ntpd 2>/dev/null | cut -d' ' -f1); "
+      "[ -n \"$p\" ] && tr '\\0' ' ' < \"/proc/$p/cmdline\" "
+      "2>/dev/null");
+  if (const auto pos = cmdline.find("-p ");
+      pos != std::string::npos) {
+    std::istringstream iss(cmdline.substr(pos + 3));
+    iss >> st.server;
+  }
+  if (st.server.empty()) st.server = "not configured";
   return st;
 }
 
