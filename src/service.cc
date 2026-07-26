@@ -9,10 +9,13 @@
 #include <climits>
 #include <cstdlib>
 #include <format>
+#include <map>
 #include <string>
 #include <vector>
 
+#include "einheit/cli/confd/boot_report.h"
 #include "einheit/s5/dsa.h"
+#include "einheit/s5/fabric.h"
 #include "einheit/s5/poe.h"
 #include "einheit/s5/sys.h"
 #include "einheit/s5/util.h"
@@ -83,9 +86,18 @@ auto SafeToken(const std::string &v) -> bool {
   return true;
 }
 
+auto PortsCache() -> std::vector<std::string> & {
+  static std::vector<std::string> ports;
+  return ports;
+}
+
 auto Ports() -> const std::vector<std::string> & {
-  // DSA port set is fixed by the device tree; discover once.
-  static const std::vector<std::string> ports = dsa::DiscoverPorts();
+  // DSA port set is fixed by the device tree, so discover once. Empty
+  // is not cached: a box whose ports have not appeared yet must be
+  // allowed to find them on the next command rather than insisting
+  // forever that it has none.
+  auto &ports = PortsCache();
+  if (ports.empty()) ports = dsa::DiscoverPorts();
   return ports;
 }
 
@@ -121,10 +133,38 @@ auto ShowInterfaces(const Request &req) -> Response {
   return Ok(req, body);
 }
 
+/// Counter baselines for `clear counters`.
+///
+/// The kernel does not let anything zero a netdev's statistics, so
+/// "clear" is a snapshot the reads subtract from. It lives in the
+/// service rather than on disk on purpose: counters are operational
+/// state, and a reboot genuinely does reset them, so a baseline that
+/// outlived the process would under-report after one.
+std::map<std::string, dsa::PortCounters> g_counter_base;  // NOLINT
+
+auto SubtractBase(const dsa::PortCounters &c) -> dsa::PortCounters {
+  const auto it = g_counter_base.find(c.name);
+  if (it == g_counter_base.end()) return c;
+  const auto &b = it->second;
+  dsa::PortCounters out = c;
+  // Saturating: an interface that reset under us (module reload, or a
+  // counter wrap) must read as 0, never as an enormous number.
+  const auto sub = [](std::uint64_t now, std::uint64_t base) {
+    return now >= base ? now - base : 0;
+  };
+  out.rx_bytes = sub(c.rx_bytes, b.rx_bytes);
+  out.tx_bytes = sub(c.tx_bytes, b.tx_bytes);
+  out.rx_packets = sub(c.rx_packets, b.rx_packets);
+  out.tx_packets = sub(c.tx_packets, b.tx_packets);
+  out.rx_errors = sub(c.rx_errors, b.rx_errors);
+  out.tx_errors = sub(c.tx_errors, b.tx_errors);
+  return out;
+}
+
 auto ShowCounters(const Request &req) -> Response {
   std::string body;
   for (const auto &name : FilteredPorts(req)) {
-    const auto c = dsa::GetPortCounters(name);
+    const auto c = SubtractBase(dsa::GetPortCounters(name));
     body += Row({c.name, std::to_string(c.rx_bytes),
                  std::to_string(c.tx_bytes),
                  std::to_string(c.rx_packets),
@@ -134,10 +174,100 @@ auto ShowCounters(const Request &req) -> Response {
   return Ok(req, body);
 }
 
+auto ClearCounters(const Request &req) -> Response {
+  const auto filter = Arg(req, 0);
+  if (!filter.empty() && !SafeToken(filter)) {
+    return Err(req, "bad-arg", std::format("invalid port '{}'", filter));
+  }
+  std::size_t cleared = 0;
+  for (const auto &name : Ports()) {
+    if (!filter.empty() && name != filter) continue;
+    g_counter_base[name] = dsa::GetPortCounters(name);
+    ++cleared;
+  }
+  if (cleared == 0) {
+    return Err(req, "bad-arg", std::format("no such port '{}'", filter));
+  }
+  return Ok(req, std::format("counters cleared on {} port(s)\n", cleared));
+}
+
 auto ShowMacTable(const Request &req) -> Response {
   std::string body;
+  const auto filter = Arg(req, 0);
   for (const auto &e : dsa::GetMacTable()) {
-    body += Row({e.mac, e.port, std::to_string(e.vid)});
+    if (!filter.empty() && e.port != filter) continue;
+    // `local` is the port's own address and `multicast` a group the
+    // kernel joined: both are permanent but neither is configuration,
+    // and calling them "static" would invite an operator to try to
+    // delete them.
+    const char *type = e.is_local          ? "local"
+                       : e.is_multicast    ? "multicast"
+                       : e.is_static       ? "static"
+                                           : "dynamic";
+    body += Row({e.mac, e.port, std::to_string(e.vid), type});
+  }
+  return Ok(req, body);
+}
+
+/// `clear mac-table [port]` — flush LEARNED entries only. A static
+/// entry is configuration; an operational verb must not delete config.
+auto ClearMacTable(const Request &req) -> Response {
+  const auto port = Arg(req, 0);
+  if (!port.empty() && !SafeToken(port)) {
+    return Err(req, "bad-arg", std::format("invalid port '{}'", port));
+  }
+  if (!dsa::FlushMacTable(port)) {
+    return Err(req, "hw-error", "flushing the MAC table failed");
+  }
+  return Ok(req, port.empty()
+                     ? "learned MAC entries flushed\n"
+                     : std::format("learned MAC entries on {} flushed\n",
+                                   port));
+}
+
+auto ShowIgmpSnooping(const Request &req) -> Response {
+  const auto topo = fabric::S5Topology();
+  const auto st = dsa::GetSnooping(topo.bridge);
+  std::string body;
+  body += Row({"snooping", st.enabled ? "enabled" : "disabled"});
+  body += Row({"querier", st.querier ? "enabled" : "disabled"});
+  for (const auto &e : dsa::GetMdb()) {
+    body += Row({std::format("group {}", e.group),
+                 std::format("{} vlan {}", e.port, e.vid)});
+  }
+  return Ok(req, body);
+}
+
+/// `show interfaces detail [port]` — what a port was CONFIGURED to do
+/// alongside what it actually negotiated. Both, because "I set 1000
+/// and the link came up at 100" is the question this answers.
+auto ShowInterfacesDetail(const Request &req) -> Response {
+  std::string body;
+  for (const auto &name : FilteredPorts(req)) {
+    const auto st = dsa::GetPortStatus(name);
+    const auto link = dsa::GetPortParams(name);
+    const auto c = dsa::GetPortCounters(name);
+    body += Row({name, "link", st.link ? "up" : "down"});
+    body += Row({name, "admin", st.enabled ? "up" : "down"});
+    body += Row({name, "speed", std::format("{} (negotiated {})",
+                                            link.speed,
+                                            link.negotiated_speed)});
+    body += Row({name, "duplex", std::format("{} (negotiated {})",
+                                             link.duplex,
+                                             link.negotiated_duplex)});
+    body += Row({name, "mtu", std::to_string(link.mtu)});
+    body += Row({name, "flow-control", link.flow_control ? "on" : "off"});
+    body += Row({name, "rx", std::format("{} bytes / {} pkts / {} err",
+                                         c.rx_bytes, c.rx_packets,
+                                         c.rx_errors)});
+    body += Row({name, "tx", std::format("{} bytes / {} pkts / {} err",
+                                         c.tx_bytes, c.tx_packets,
+                                         c.tx_errors)});
+    if (const auto n = ParseInt(name.substr(3)); n && poe::Available()) {
+      const auto p = poe::GetPortStatus(*n);
+      body += Row({name, "poe", std::format("{:.1f} W ({})", p.power_w,
+                                            p.status)});
+    }
   }
   return Ok(req, body);
 }
@@ -148,6 +278,61 @@ auto ShowVlans(const Request &req) -> Response {
     body += Row({std::to_string(v.vid), v.port,
                  v.untagged ? "yes" : "-", v.pvid ? "yes" : "-"});
   }
+  return Ok(req, body);
+}
+
+/// State directory, for the boot report `show system` reads.
+std::string g_state_dir;  // NOLINT: process-wide config seam
+
+/// The `config-divergence` row (WP0.6). Three distinguishable answers,
+/// because they mean different things to an operator:
+///   "none"                  — the box came back holding what was
+///                             committed.
+///   "N path(s) at boot ..." — reality disagreed with committed intent:
+///                             something changed the box outside the
+///                             management plane.
+///   "unknown (...)"         — we cannot say, and saying "none" would
+///                             be a lie. Notably when boot-restore did
+///                             not run on this boot at all.
+auto DivergenceSummary() -> std::string {
+  if (g_state_dir.empty()) return "unknown (no state directory)";
+  auto rep = cli::confd::LoadBootReport(g_state_dir);
+  if (!rep) return "unknown (boot report unreadable)";
+  if (!rep->has_value()) return "unknown (no boot report)";
+  const auto &r = **rep;
+  if (!cli::confd::IsFromCurrentBoot(r, cli::confd::CurrentBootId())) {
+    return "unknown (boot-restore did not run this boot)";
+  }
+  if (r.reconcile_conflicts == 0) return "none";
+  return std::format("{} path(s) diverged at boot from commit {}",
+                     r.reconcile_conflicts, r.applied_revision);
+}
+
+auto Join(const std::vector<std::string> &items) -> std::string {
+  if (items.empty()) return "-";
+  std::string out;
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) out += ' ';
+    out += items[i];
+  }
+  return out;
+}
+
+/// The fabric the backend builds, as the box actually holds it. This is
+/// how "my VLANs do nothing" gets diagnosed: vlan_filtering off, or a
+/// port that never made it into the bridge.
+auto ShowFabric(const Request &req) -> Response {
+  const auto st = fabric::GetStatus(fabric::S5Topology());
+  std::string body;
+  body += Row({"bridge", st.bridge});
+  body += Row({"exists", st.exists ? "yes" : "no"});
+  body += Row({"vlan filtering", st.vlan_filtering ? "yes" : "no"});
+  body += Row({"state", st.up ? "up" : "down"});
+  body += Row({"conduit", st.conduit.empty() ? "-" : st.conduit});
+  body += Row({"enslaved", Join(st.enslaved)});
+  body += Row({"detached", Join(st.detached)});
+  body += Row({"absent", Join(st.absent)});
+  body += Row({"routed", Join(st.routed)});
   return Ok(req, body);
 }
 
@@ -173,6 +358,7 @@ auto ShowSystem(const Request &req) -> Response {
   body += Row({"disk", std::format("{} / {} ({})", disk.used,
                                    disk.size, disk.use_pct)});
   body += Row({"ports", std::to_string(Ports().size())});
+  body += Row({"config-divergence", DivergenceSummary()});
   return Ok(req, body);
 }
 
@@ -317,12 +503,26 @@ auto RebootBox(const Request &req) -> Response {
 
 }  // namespace
 
+auto SetStateDir(std::string dir) -> void {
+  g_state_dir = std::move(dir);
+}
+
+auto ResetCachesForTesting() -> void {
+  PortsCache().clear();
+  g_counter_base.clear();
+}
+
 auto HandleProduct(const Request &req) -> std::optional<Response> {
   const auto &c = req.command;
   if (c == "show_interfaces") return ShowInterfaces(req);
   if (c == "show_counters") return ShowCounters(req);
   if (c == "show_mac_table") return ShowMacTable(req);
+  if (c == "clear_mac_table") return ClearMacTable(req);
+  if (c == "show_igmp_snooping") return ShowIgmpSnooping(req);
+  if (c == "show_interfaces_detail") return ShowInterfacesDetail(req);
+  if (c == "clear_counters") return ClearCounters(req);
   if (c == "show_vlans") return ShowVlans(req);
+  if (c == "show_fabric") return ShowFabric(req);
   if (c == "show_version") return ShowVersion(req);
   if (c == "show_system") return ShowSystem(req);
   if (c == "show_ip") return ShowIp(req);

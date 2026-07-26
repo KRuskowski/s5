@@ -1,0 +1,15 @@
+# The product owns its switch fabric (ROADMAP Phase 0): br0 with
+# vlan_filtering, lan1..lan4 enslaved, lan5 left routed as the uplink.
+# Applying any VLAN at all proves the ordering — `bridge vlan add` on an
+# unbridged port would fail outright.
+[config]
+ports.lan1.vlan.40 untagged-pvid
+[expect-box]
+ip -br link show br0 :: br0
+cat /sys/class/net/br0/bridge/vlan_filtering :: 1
+readlink /sys/class/net/lan1/master :: br0
+readlink /sys/class/net/lan4/master :: br0
+sudo /usr/sbin/bridge vlan show | awk '/^[a-z]/{f=($1=="lan1")} f' :: 40 PVID Egress Untagged
+[expect-cli]
+show fabric :: yes
+show fabric :: lan1

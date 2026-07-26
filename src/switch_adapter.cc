@@ -111,16 +111,79 @@ class SwitchAdapter : public ProductAdapter {
             .help = "Show port counters",
         },
         CommandSpec{
+            .path = "show interfaces detail",
+            .args = {{.name = "port", .help = "Port name",
+                      .required = false}},
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_interfaces_detail",
+            .help = "Show configured vs negotiated link parameters "
+                    "and counters",
+        },
+        CommandSpec{
+            .path = "clear counters",
+            .args = {{.name = "port", .help = "Port name",
+                      .required = false}},
+            .role = cli::RoleGate::AdminOnly,
+            .wire_command = "clear_counters",
+            .help = "Zero the counter baseline (all ports, or one)",
+        },
+        CommandSpec{
             .path = "show mac-table",
+            .args = {{.name = "port", .help = "Port name",
+                      .required = false}},
             .role = cli::RoleGate::AnyAuthenticated,
             .wire_command = "show_mac_table",
-            .help = "Show learned MAC addresses",
+            .help = "Show the MAC table (static and learned)",
+        },
+        CommandSpec{
+            .path = "clear mac-table",
+            .args = {{.name = "port", .help = "Port name",
+                      .required = false}},
+            .role = cli::RoleGate::AdminOnly,
+            .wire_command = "clear_mac_table",
+            .help = "Flush learned MACs; static entries are config and "
+                    "stay",
+        },
+        CommandSpec{
+            .path = "show igmp-snooping",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_igmp_snooping",
+            .help = "Show multicast snooping state and groups",
         },
         CommandSpec{
             .path = "show vlans",
             .role = cli::RoleGate::AnyAuthenticated,
             .wire_command = "show_vlans",
             .help = "Show VLAN configuration",
+        },
+        // Served by the confd runtime, not by service::HandleProduct:
+        // commits, the open session, the edit-lock holder and any
+        // pending commit-confirmed countdown. The framework's config
+        // globals deliberately leave this verb to the adapter, so
+        // without it that state has no CLI surface at all.
+        CommandSpec{
+            .path = "show status",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_status",
+            .help = "Show config-plane status: commits, session, edit "
+                    "lock, pending commit-confirmed",
+        },
+        // Boot APPLY needs no verb — `rollback to <id>` is the
+        // operator equivalent — but the boot OUTCOME is state, and
+        // state gets a show verb. Served by the confd runtime from the
+        // report persisted beside the store, so an interactive session
+        // that never ran a boot apply can still answer.
+        CommandSpec{
+            .path = "show system boot",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_system_boot",
+            .help = "Show what the last boot-restore did",
+        },
+        CommandSpec{
+            .path = "show fabric",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_fabric",
+            .help = "Show the switch fabric (bridge, members, conduit)",
         },
         CommandSpec{
             .path = "show version",
@@ -289,12 +352,50 @@ class SwitchAdapter : public ProductAdapter {
       AddColumn(t, "mac", Align::Left, Priority::High);
       AddColumn(t, "port", Align::Left, Priority::High);
       AddColumn(t, "vlan", Align::Right, Priority::Medium);
+      AddColumn(t, "type", Align::Left, Priority::Medium);
       for (const auto &row : rows) {
+        // Static entries are configuration; colouring them apart is
+        // what stops an operator reading a configured entry as
+        // something the switch happened to learn.
+        const bool is_static = Field(row, 3) == "static";
         AddRow(t, {
             Cell{Field(row, 0)},
             Cell{Field(row, 1), Semantic::Emphasis},
             Cell{Field(row, 2), Semantic::Dim},
+            Cell{Field(row, 3),
+                 is_static ? Semantic::Info : Semantic::Dim},
         });
+      }
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_interfaces_detail") {
+      Table t;
+      AddColumn(t, "port", Align::Left, Priority::High);
+      AddColumn(t, "field", Align::Left, Priority::High);
+      AddColumn(t, "value", Align::Left, Priority::High);
+      for (const auto &row : DecodeRows(response)) {
+        auto sem = Semantic::Default;
+        if (Field(row, 1) == "link" || Field(row, 1) == "admin") {
+          sem = Field(row, 2) == "up" ? Semantic::Good : Semantic::Bad;
+        }
+        AddRow(t, {
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1)},
+            Cell{Field(row, 2), sem},
+        });
+      }
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_igmp_snooping") {
+      Table t;
+      AddColumn(t, "field", Align::Left, Priority::High);
+      AddColumn(t, "value", Align::Left, Priority::High);
+      for (const auto &row : DecodeRows(response)) {
+        auto sem = Semantic::Default;
+        if (Field(row, 0) == "snooping") {
+          sem = Field(row, 1) == "enabled" ? Semantic::Good
+                                           : Semantic::Warn;
+        }
+        AddRow(t, {Cell{Field(row, 0), Semantic::Emphasis},
+                   Cell{Field(row, 1), sem}});
       }
       RenderFormatted(t, renderer);
     } else if (wire == "show_vlans") {
@@ -317,7 +418,8 @@ class SwitchAdapter : public ProductAdapter {
         });
       }
       RenderFormatted(t, renderer);
-    } else if (wire == "show_system" || wire == "show_ntp") {
+    } else if (wire == "show_system" || wire == "show_ntp" ||
+               wire == "show_fabric") {
       Table t;
       AddColumn(t, "field", Align::Left, Priority::High);
       AddColumn(t, "value", Align::Left, Priority::High);
@@ -326,6 +428,30 @@ class SwitchAdapter : public ProductAdapter {
         if (wire == "show_ntp" && Field(row, 0) == "synced") {
           sem = Field(row, 1) == "yes" ? Semantic::Good
                                        : Semantic::Warn;
+        }
+        // A fabric that is missing, filtering-off or has a detached
+        // member is the reason VLAN config appears to do nothing, so
+        // colour those rows rather than leaving them to be read.
+        if (wire == "show_fabric") {
+          const auto &field = Field(row, 0);
+          const auto &value = Field(row, 1);
+          if (field == "exists" || field == "vlan filtering") {
+            sem = value == "yes" ? Semantic::Good : Semantic::Bad;
+          } else if (field == "state") {
+            sem = value == "up" ? Semantic::Good : Semantic::Bad;
+          } else if (field == "detached" || field == "absent") {
+            sem = value == "-" ? Semantic::Dim : Semantic::Warn;
+          } else if (field == "conduit") {
+            sem = value == "-" ? Semantic::Warn : Semantic::Default;
+          }
+        }
+        // A box whose configuration drifted out of band, or whose boot
+        // outcome is unknown, must not read like a healthy row.
+        if (wire == "show_system" && Field(row, 0) == "config-divergence") {
+          const auto &value = Field(row, 1);
+          sem = value == "none"      ? Semantic::Good
+                : value.starts_with("unknown") ? Semantic::Warn
+                                               : Semantic::Bad;
         }
         AddRow(t, {Cell{Field(row, 0), Semantic::Emphasis},
                    Cell{Field(row, 1), sem}});
@@ -412,7 +538,8 @@ class SwitchAdapter : public ProductAdapter {
       renderer.Out() << std::string(response.data.begin(),
                                     response.data.end());
     } else if (wire == "poe_reset" || wire == "user_add" ||
-               wire == "user_remove" || wire == "reboot") {
+               wire == "user_remove" || wire == "reboot" ||
+               wire == "clear_counters" || wire == "clear_mac_table") {
       renderer.Out() << "  "
                      << std::string(response.data.begin(),
                                     response.data.end());

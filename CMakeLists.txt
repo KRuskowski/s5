@@ -19,6 +19,7 @@ add_library(s5_lib STATIC
   src/backend.cc
   src/service.cc
   src/dsa.cc
+  src/fabric.cc
   src/poe.cc
   src/util.cc
   src/sys.cc

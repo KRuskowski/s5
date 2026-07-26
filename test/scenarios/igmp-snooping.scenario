@@ -1,0 +1,11 @@
+# WP1.7: multicast snooping on the bridge. Off by default in the
+# kernel, which is why it is config rather than something inherited.
+[config]
+igmp_snooping.enabled true
+igmp_snooping.querier true
+[expect-box]
+cat /sys/class/net/br0/bridge/multicast_snooping :: 1
+cat /sys/class/net/br0/bridge/multicast_querier :: 1
+[expect-cli]
+show igmp-snooping :: enabled
+show config igmp_snooping :: true

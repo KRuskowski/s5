@@ -1,0 +1,13 @@
+# WP1.4: a static MAC entry is configuration — it shows up marked
+# `static`, and `clear mac-table` must not remove it.
+[config]
+mac.aging_time 600
+mac.static.aa:bb:cc:dd:ee:01.port lan1
+mac.static.aa:bb:cc:dd:ee:01.vlan 1
+[expect-box]
+sudo /usr/sbin/bridge fdb show | grep aa:bb:cc:dd:ee:01 :: lan1
+cat /sys/class/net/br0/bridge/ageing_time :: 60000
+[expect-cli]
+show mac-table :: aa:bb:cc:dd:ee:01
+show mac-table :: static
+show config mac :: 600

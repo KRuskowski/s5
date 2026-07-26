@@ -1,0 +1,51 @@
+# einheit-config v1
+#
+# Shipped factory defaults, read by `load factory` in the CLI. Install
+# as /etc/einheit/s5/factory.conf — part of the image, NOT of the
+# writable state directory, so a factory reset cannot be pointed at a
+# file the operator edited.
+#
+# Format: one `<schema-path> <value>` line per setting; `#` comments and
+# blank lines are ignored. Exactly what `save <name>` writes, so a
+# known-good box can produce this file with `save` and a copy off the
+# state directory.
+#
+# Absent from the image, `load factory` stages the EMPTY configuration
+# instead, which on commit returns the box to its own power-on defaults.
+#
+# Factory reset from the CLI:
+#     configure
+#     load factory
+#     show diff
+#     commit
+#
+# This file is also what a factory-fresh box boots into: `--apply-boot`
+# with no commit history applies it and records it as commit 1. That is
+# not a convenience — every Linux switch port comes up administratively
+# DOWN, so an unseeded box would ship forwarding nothing. The port lines
+# below are what turn the switch on.
+#
+# lan1..lan4 are bridged into br0 by the fabric bootstrap (which is
+# hardcoded, not config); lan5 is left routed as the uplink. Only
+# settings the operator can change belong here.
+#
+# NOTE: no `poe.*` lines on purpose. The backend rejects any poe path
+# when the I2C bus is unreadable, so a poe line here would turn a dead
+# PoE bus into a box that cannot complete its first boot. The PSE
+# controllers come up enabled in hardware; PoE is configured after boot.
+#
+# NOTE: no management addressing either, and that is an OPEN PRODUCT
+# DECISION rather than an omission — how a factory-fresh S501 is first
+# reached (console only, DHCP client on br0, or a fixed address) has not
+# been decided. Watch out when adding it: `interfaces.<i>.dhcp true`
+# takes precedence over `interfaces.<i>.address` in the backend and
+# flushes it, so shipping `interfaces.br0.dhcp true` here would make an
+# operator's later `set interfaces.br0.address` appear to do nothing
+# until they also `delete interfaces.br0.dhcp`.
+
+hostname einheit-s5
+ports.lan1.enabled true
+ports.lan2.enabled true
+ports.lan3.enabled true
+ports.lan4.enabled true
+ports.lan5.enabled true

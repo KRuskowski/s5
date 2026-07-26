@@ -1,0 +1,39 @@
+#!/bin/sh
+# einheit s5 boot-restore for a BusyBox init rootfs (Buildroot /
+# OpenWrt), the production image for the T113-S3.
+#
+# Install as /etc/init.d/S39einheit-s5, mode 755. S39 places it
+# immediately before Buildroot's S40network, so the bridge and the
+# enslaved switch ports exist before anything tries to address br0.
+#
+# The systemd equivalent is deploy/einheit-s5-boot.service.
+
+CLI=/usr/local/bin/einheit_s5
+
+case "$1" in
+  start)
+    printf 'Restoring einheit s5 configuration: '
+    if [ ! -x "$CLI" ]; then
+      echo "FAIL ($CLI missing)"
+      exit 1
+    fi
+    # Output goes to the console and the log: a boot that could not
+    # restore its configuration must say so where an operator sees it.
+    if "$CLI" --apply-boot; then
+      echo OK
+    else
+      echo FAIL
+      exit 1
+    fi
+    ;;
+  stop)
+    # Nothing to tear down — the configuration is meant to outlive us.
+    ;;
+  restart | reload)
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
