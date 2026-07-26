@@ -71,6 +71,12 @@ if(EINHEIT_S5_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
   add_test(NAME test_s5_pty
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/test/pty_suite.py
             $<TARGET_FILE:einheit_s5>)
+  # docs/reference.md is generated from the binary; a stale checked-in
+  # copy fails the build. Regenerate:
+  #   ./build/einheit_s5 --dump-docs > docs/reference.md
+  add_test(NAME test_s5_docs_current
+    COMMAND bash -c
+      "diff <($<TARGET_FILE:einheit_s5> --dump-docs) ${CMAKE_CURRENT_SOURCE_DIR}/docs/reference.md")
 endif()
 
 # ------------------------------------------------------------------

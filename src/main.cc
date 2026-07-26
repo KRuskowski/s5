@@ -44,6 +44,7 @@
 #include "einheit/cli/auth.h"
 #include "einheit/cli/command_tree.h"
 #include "einheit/cli/confd/runtime.h"
+#include "einheit/cli/docs.h"
 #include "einheit/cli/globals.h"
 #include "einheit/cli/render/terminal_caps.h"
 #include "einheit/cli/shell.h"
@@ -116,6 +117,24 @@ auto MakeRuntimeOptions(const std::string &state_dir)
   ropts.audit = MakeAuditSink(state_dir);
   ropts.factory_config = kFactoryConfigPath;
   return ropts;
+}
+
+/// Print the generated operator reference (markdown) and exit.
+auto RunDumpDocs() -> int {
+  auto schema = einheit::s5::MakeS5Schema();
+  auto adapter = einheit::s5::MakeSwitchAdapter(schema);
+  CommandTree tree;
+  if (auto r = RegisterGlobals(tree, GlobalsOptions{}); !r) {
+    std::cerr << std::format("register globals: {}\n",
+                             r.error().message);
+    return 1;
+  }
+  for (auto &spec : adapter->Commands()) {
+    (void)Register(tree, std::move(spec));
+  }
+  std::cout << docs::GenerateReference(adapter->Metadata(), tree,
+                                       schema.Get());
+  return 0;
 }
 
 /// Boot-restore oneshot: fabric, then the committed configuration.
@@ -297,22 +316,40 @@ int main(int argc, char *argv[]) {
   signals::InstallFaultHandlers(crash_log);
 
   bool apply_boot = false;
+  bool dump_docs = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--apply-boot") {
       apply_boot = true;
+    } else if (arg == "--dump-docs") {
+      dump_docs = true;
     } else if (arg == "--help" || arg == "-h") {
-      std::cout << "usage: einheit_s5 [--apply-boot]\n"
+      std::cout << "usage: einheit_s5 [--apply-boot|--dump-docs]\n"
                    "  (no arguments)  interactive CLI\n"
                    "  --apply-boot    build the fabric and re-apply the "
                    "committed\n"
                    "                  configuration, then exit (run "
-                   "from init)\n";
+                   "from init)\n"
+                   "  --dump-docs     print the generated operator "
+                   "reference\n"
+                   "                  (markdown) and exit\n";
       return 0;
     } else {
       std::cerr << std::format(
           "einheit-s5: unknown argument '{}' (try --help)\n", arg);
       return 2;
+    }
+  }
+
+  if (dump_docs) {
+    // Reference docs from the same structures the binary runs on —
+    // the repo checks the output in and a test diffs the two, so
+    // docs/reference.md cannot go stale (see docs/README.md).
+    try {
+      return RunDumpDocs();
+    } catch (const std::exception &e) {
+      std::cerr << std::format("einheit-s5: fatal: {}\n", e.what());
+      return 1;
     }
   }
 
