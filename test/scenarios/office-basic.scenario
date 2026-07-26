@@ -1,0 +1,17 @@
+# Classic small office: two access VLANs, one trunk uplink.
+[config]
+ports.lan1.vlan.10 untagged-pvid
+ports.lan2.vlan.10 untagged-pvid
+ports.lan3.vlan.20 untagged-pvid
+ports.lan4.vlan.10 tagged
+ports.lan4.vlan.20 tagged
+[delete]
+ports.lan1.vlan.1
+ports.lan2.vlan.1
+ports.lan3.vlan.1
+[expect-box]
+sudo /usr/sbin/bridge vlan show | awk '/^[a-z]/{f=($1=="lan1")} f' :: 10 PVID Egress Untagged
+sudo /usr/sbin/bridge vlan show | awk '/^[a-z]/{f=($1=="lan3")} f' :: 20 PVID Egress Untagged
+[expect-cli]
+show vlans :: 10
+show vlans :: 20

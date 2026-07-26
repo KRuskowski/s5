@@ -1,0 +1,5 @@
+# PoE on a box without the I2C bus rejects cleanly (VM tier).
+[config]
+poe.1.enabled true
+[expect-commit-fail]
+PoE bus unavailable

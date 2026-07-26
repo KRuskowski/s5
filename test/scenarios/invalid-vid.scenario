@@ -1,0 +1,6 @@
+# Out-of-range VID must fail the commit with nothing applied.
+[config]
+hostname never-lands
+ports.lan1.vlan.5000 tagged
+[expect-commit-fail]
+VID must be 1-4094

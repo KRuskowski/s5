@@ -1,0 +1,12 @@
+# Guest VLAN on lan3, trunked upstream; access port loses VLAN 1.
+# bridge vlan show puts the port name only on its first row, so the
+# assertion selects the lan3 block before matching.
+[config]
+ports.lan3.vlan.30 untagged-pvid
+ports.lan4.vlan.30 tagged
+[delete]
+ports.lan3.vlan.1
+[expect-box]
+sudo /usr/sbin/bridge vlan show | awk '/^[a-z]/{f=($1=="lan3")} f' :: 30 PVID Egress Untagged
+[expect-cli]
+show vlans :: 30

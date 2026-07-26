@@ -1,0 +1,9 @@
+# Take two ports administratively down (flags lose UP entirely).
+[config]
+ports.lan2.enabled false
+ports.lan4.enabled false
+[expect-box]
+ip link show lan2 :: <BROADCAST,MULTICAST> mtu
+ip link show lan4 :: <BROADCAST,MULTICAST> mtu
+[expect-cli]
+show interfaces :: lan2

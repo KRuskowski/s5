@@ -1,0 +1,14 @@
+# Management identity: hostname, DNS, SVI on the bridge, routed lan5.
+[config]
+hostname scn-mgmt
+dns.primary 192.0.2.53
+dns.secondary 192.0.2.54
+interfaces.br0.address 10.90.0.1/24
+interfaces.lan5.address 10.55.9.1/24
+[expect-box]
+hostname :: scn-mgmt
+cat /etc/resolv.conf :: nameserver 192\.0\.2\.53
+ip -br addr show br0 :: 10\.90\.0\.1/24
+ip -br addr show lan5 :: 10\.55\.9\.1/24
+[expect-cli]
+show config :: scn-mgmt
