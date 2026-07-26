@@ -124,6 +124,38 @@ auto SetInterfaceDhcp(const std::string &iface) -> bool {
   return true;
 }
 
+auto GetManagementPath() -> MgmtPath {
+  MgmtPath path;
+  // SSH_CONNECTION is "<client ip> <client port> <server ip> <server
+  // port>". A console session has none, and a console operator cannot
+  // lock themselves out of the console.
+  const char *conn = std::getenv("SSH_CONNECTION");
+  if (conn == nullptr) return path;
+  std::istringstream iss(conn);
+  std::string peer;
+  iss >> peer;
+  if (peer.empty()) return path;
+  // Only ever fed to `ip route get`, but that is a shell line.
+  for (char c : peer) {
+    const bool ok = (std::isalnum(static_cast<unsigned char>(c)) != 0) ||
+                    c == '.' || c == ':';
+    if (!ok) return path;
+  }
+  path.peer = peer;
+  // `ip route get 10.0.0.9` answers with the route the kernel would
+  // actually use: "10.0.0.9 dev br0.10 src 10.10.0.1 uid 0", or with a
+  // `via` when the answer has to be routed.
+  const auto route = RunCmd("ip route get " + peer + " 2>/dev/null");
+  std::istringstream ls(route);
+  std::string token;
+  while (ls >> token) {
+    if (token == "dev") ls >> path.device;
+    if (token == "src") ls >> path.address;
+    if (token == "via") path.routed = true;
+  }
+  return path;
+}
+
 // ── DNS ─────────────────────────────────────────────────────
 
 auto GetDnsServers() -> std::vector<std::string> {
@@ -170,15 +202,27 @@ auto GetNtpStatus() -> NtpStatus {
   return st;
 }
 
-auto SetNtpServer(const std::string &server) -> bool {
+auto SetNtpServer(const std::string &server, bool serve) -> bool {
   RunCmd("pkill -x ntpd 2>/dev/null; killall ntpd 2>/dev/null");
+  // busybox ntpd's `-l` turns the same daemon into a server as well as
+  // a client, which is why serving is not a separate process: a box
+  // handing out time it never synchronised would be worse than one
+  // that hands out none.
+  const std::string listen = serve ? "-l " : "";
   // ntpd daemonizes on launch; the apply only counts if the daemon
   // is actually up afterwards — a box without ntpd must fail the
   // commit, not silently pretend.
-  const auto out = RunCmd("ntpd -p " + server +
+  const auto out = RunCmd("ntpd " + listen + "-p " + server +
                           " 2>/dev/null; sleep 1; "
                           "pidof ntpd 2>/dev/null");
   return !out.empty();
+}
+
+auto GetNtpServing() -> bool {
+  const auto cmdline = RunCmd(
+      "p=$(pidof ntpd 2>/dev/null | cut -d' ' -f1); "
+      "[ -n \"$p\" ] && tr '\\0' ' ' < \"/proc/$p/cmdline\" 2>/dev/null");
+  return cmdline.find(" -l ") != std::string::npos;
 }
 
 // ── Users ───────────────────────────────────────────────────

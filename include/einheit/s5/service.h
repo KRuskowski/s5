@@ -12,12 +12,26 @@
 #ifndef EINHEIT_S5_SERVICE_H_
 #define EINHEIT_S5_SERVICE_H_
 
+#include <functional>
 #include <optional>
 #include <string>
 
+#include "einheit/cli/confd/config_backend.h"
 #include "einheit/cli/protocol/envelope.h"
 
 namespace einheit::s5::service {
+
+/// Let the service read the running configuration.
+///
+/// Almost everything a `show` verb prints is read off the box, which
+/// is the right default: it reports what IS, not what was asked for.
+/// A few things have no counterpart on the box at all — a VLAN's name
+/// exists only in the configuration — and printing a VLAN table
+/// without names because of an architectural preference would be
+/// serving the architecture rather than the operator.
+/// @param reader Returns the running config, or empty when unset.
+auto SetRunningConfigReader(
+    std::function<einheit::cli::confd::Config()> reader) -> void;
 
 /// Point the service at the durable state directory. `show system`
 /// reads the framework's boot report from there for its

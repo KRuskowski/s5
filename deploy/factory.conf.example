@@ -43,7 +43,17 @@
 # operator's later `set interfaces.br0.address` appear to do nothing
 # until they also `delete interfaces.br0.dhcp`.
 
+# NOTE: `stp.mode rstp` is deliberate and is the one line here that can
+# stop a factory-fresh box from finishing its first boot — the backend
+# rejects a spanning-tree commit on a box without mstpd rather than
+# pretending loop protection is on. That is the trade we want: a shipped
+# switch that melts the first time somebody patches two wall sockets
+# together is worse than one that refuses to boot on an image missing a
+# package its own factory defaults name. The image MUST ship mstpd +
+# mstpctl (see deploy/README.md).
+
 hostname einheit-s5
+stp.mode rstp
 ports.lan1.enabled true
 ports.lan2.enabled true
 ports.lan3.enabled true

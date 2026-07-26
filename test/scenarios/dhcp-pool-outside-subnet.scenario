@@ -1,0 +1,11 @@
+# A pool the switch is not in cannot be served, and dnsmasq would say
+# so by refusing to start — after the apply had already written half
+# the box. The commit has to fail first, with the operator's own path
+# named in the message.
+[config]
+vlans.10.address 10.10.0.1/24
+vlans.10.dhcp.enabled true
+vlans.10.dhcp.range_start 10.10.0.100
+vlans.10.dhcp.range_end 10.99.0.200
+[expect-commit-fail]
+outside

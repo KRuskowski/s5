@@ -1,0 +1,39 @@
+# Two VLANs, two pools, one reservation, and the switch answering DNS
+# for its own domain. The generated dnsmasq config is an apply
+# artifact — the box assertions read it rather than any hand-written
+# file, because there is no hand-written file.
+[config]
+vlans.10.name office
+vlans.10.address 10.10.0.1/24
+vlans.10.dhcp.enabled true
+vlans.10.dhcp.range_start 10.10.0.100
+vlans.10.dhcp.range_end 10.10.0.150
+vlans.10.dhcp.lease_time 240
+vlans.10.dhcp.static.aa:bb:cc:dd:ee:01.ip 10.10.0.50
+vlans.20.name guest
+vlans.20.address 10.20.0.1/24
+vlans.20.dhcp.enabled true
+vlans.20.dhcp.range_start 10.20.0.100
+vlans.20.dhcp.range_end 10.20.0.120
+# Set explicitly rather than relying on the default: a scenario's
+# [config] is applied on top of RUNNING, so an unset path keeps
+# whatever the box already held and the assertion below would depend
+# on which scenario ran before this one.
+vlans.20.dhcp.lease_time 720
+vlans.20.dhcp.dns 9.9.9.9
+dns.serve true
+dns.local_domain office.lan
+dns.primary 9.9.9.9
+[expect-box]
+sudo cat /var/run/einheit/dnsmasq.conf :: dhcp-range=set:vlan10,10\.10\.0\.100,10\.10\.0\.150,255\.255\.255\.0,240m
+sudo cat /var/run/einheit/dnsmasq.conf :: dhcp-range=set:vlan20,10\.20\.0\.100,10\.20\.0\.120,255\.255\.255\.0,720m
+sudo cat /var/run/einheit/dnsmasq.conf :: dhcp-host=aa:bb:cc:dd:ee:01,10\.10\.0\.50
+sudo cat /var/run/einheit/dnsmasq.conf :: dhcp-option=tag:vlan20,6,9\.9\.9\.9
+sudo cat /var/run/einheit/dnsmasq.conf :: domain=office\.lan
+sudo cat /var/run/einheit/dnsmasq.conf :: GENERATED
+pgrep -a dnsmasq :: /var/run/einheit/dnsmasq.conf
+[expect-cli]
+show dhcp server :: vlan10
+show dhcp server :: vlan20
+show dhcp server :: running
+show system services :: dnsmasq

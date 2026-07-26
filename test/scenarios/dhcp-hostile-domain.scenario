@@ -1,0 +1,11 @@
+# dnsmasq's configuration format has no quoting at all, so a value
+# carrying a shell metacharacter or a directive separator is not
+# something to escape — it is something to refuse. The exhaustive
+# hostile-input matrix lives in the unit tests (S5Dnsmasq); this is
+# the corpus's standing guard that the refusal reaches the OPERATOR,
+# as a failed commit, on a real box.
+[config]
+dns.serve true
+dns.local_domain evil.lan;touch/tmp/pwned
+[expect-commit-fail]
+local_domain

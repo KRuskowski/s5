@@ -1,0 +1,10 @@
+# 802.1D ties the three bridge timers together, and mstpd refuses any
+# triple that breaks the relationship. The switch has to catch that
+# BEFORE the apply: rejecting it mid-write would leave spanning tree
+# half-configured on a live network.
+[config]
+stp.mode rstp
+stp.max_age 40
+stp.forward_delay 15
+[expect-commit-fail]
+forward_delay

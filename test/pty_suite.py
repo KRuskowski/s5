@@ -185,6 +185,64 @@ def no_color_menu_is_plain():
   cli.close()
 
 
+def services_tier_completes():
+  """The Phase 2 surfaces have to be reachable by TAB, not just by
+  knowing they exist. A schema path an operator cannot discover is a
+  path they will never use."""
+  cli = Cli()
+  cli.send("configure\r")
+  cli.send("set vlans.10.")
+  out = cli.send("\t")
+  check("a VLAN's fields complete", "address" in out and "dhcp" in out,
+        out)
+  cli.send("\x03", 0.5)
+  cli.send("set stp.")
+  out = cli.send("\t")
+  check("spanning-tree fields complete",
+        "priority" in out and "forward_delay" in out, out)
+  cli.send("\x03", 0.5)
+  # Enum VALUES complete too, which is the whole reason bridge
+  # priority is an enum of the sixteen legal values rather than a
+  # range with a step nobody can see.
+  cli.send("set stp.priority ")
+  out = cli.send("\t")
+  check("bridge priority offers its legal values",
+        "4096" in out and "32768" in out, out)
+  cli.close()
+
+
+def new_show_verbs_complete():
+  cli = Cli()
+  cli.send("show ")
+  out = cli.send("\t")
+  check("show offers spanning-tree", "spanning-tree" in out, out)
+  check("show offers neighbors", "neighbors" in out, out)
+  check("show offers route", "route" in out, out)
+  check("show offers dhcp", "dhcp" in out, out)
+  cli.close()
+
+
+def clear_verbs_complete():
+  cli = Cli()
+  cli.send("clear ")
+  out = cli.send("\t")
+  check("clear offers the new operational verbs",
+        "spanning-tree" in out and "dhcp" in out, out)
+  cli.close()
+
+
+def show_spanning_tree_renders_without_a_daemon():
+  """A dev box has no mstpd and no bridge. The verb still has to
+  answer — and say which of those is the reason — rather than render
+  an empty table or an error."""
+  cli = Cli()
+  out = cli.send("show spanning-tree\r", 1.5)
+  check("show spanning-tree answers on a box without STP",
+        "disabled" in out, out)
+  check("and says why", "mstpd" in out or "stp.mode" in out, out)
+  cli.close()
+
+
 def main():
   for case in (
       banner_and_color,
@@ -196,6 +254,10 @@ def main():
       strict_arity,
       dumb_terminal_falls_back,
       no_color_menu_is_plain,
+      services_tier_completes,
+      new_show_verbs_complete,
+      clear_verbs_complete,
+      show_spanning_tree_renders_without_a_daemon,
   ):
     print(f"== {case.__name__}")
     case()

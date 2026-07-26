@@ -151,10 +151,82 @@ class SwitchAdapter : public ProductAdapter {
             .help = "Show multicast snooping state and groups",
         },
         CommandSpec{
+            .path = "show neighbors",
+            .args = {{.name = "port", .help = "Port name",
+                      .required = false}},
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_neighbors",
+            .help = "Show LLDP neighbours heard on each port",
+        },
+        CommandSpec{
+            .path = "show system services",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_system_services",
+            .help = "Show the background services the switch runs, and "
+                    "whether they are up",
+        },
+        CommandSpec{
+            .path = "show spanning-tree",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_spanning_tree",
+            .help = "Show the spanning tree: root, and each port's role "
+                    "and state",
+        },
+        CommandSpec{
+            .path = "show spanning-tree statistics",
+            .args = {{.name = "port", .help = "Port name",
+                      .required = false}},
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_spanning_tree_statistics",
+            .help = "Show per-port BPDU counters and state transitions",
+        },
+        CommandSpec{
+            .path = "clear spanning-tree statistics",
+            .args = {{.name = "port", .help = "Port name",
+                      .required = false}},
+            .role = cli::RoleGate::AdminOnly,
+            .wire_command = "clear_spanning_tree_statistics",
+            .help = "Zero the spanning-tree counter baseline",
+        },
+        CommandSpec{
+            .path = "clear spanning-tree bpdu-guard",
+            .args = {{.name = "port", .help = "Port name",
+                      .required = true}},
+            .role = cli::RoleGate::AdminOnly,
+            .wire_command = "clear_bpdu_guard",
+            .help = "Return a port the BPDU guard blocked to service",
+        },
+        CommandSpec{
             .path = "show vlans",
             .role = cli::RoleGate::AnyAuthenticated,
             .wire_command = "show_vlans",
-            .help = "Show VLAN configuration",
+            .help = "Show VLANs: name, switch address, and member ports",
+        },
+        CommandSpec{
+            .path = "show dhcp leases",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_dhcp_leases",
+            .help = "Show which clients hold which addresses",
+        },
+        CommandSpec{
+            .path = "show dhcp server",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_dhcp_server",
+            .help = "Show the DHCP pools being served, and their usage",
+        },
+        CommandSpec{
+            .path = "clear dhcp lease",
+            .args = {{.name = "client", .help = "Address or MAC",
+                      .required = true}},
+            .role = cli::RoleGate::AdminOnly,
+            .wire_command = "clear_dhcp_lease",
+            .help = "Return one client's address to the pool",
+        },
+        CommandSpec{
+            .path = "show route",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_route",
+            .help = "Show the routing table and whether forwarding is on",
         },
         // Served by the confd runtime, not by service::HandleProduct:
         // commits, the open session, the edit-lock holder and any
@@ -398,6 +470,124 @@ class SwitchAdapter : public ProductAdapter {
                    Cell{Field(row, 1), sem}});
       }
       RenderFormatted(t, renderer);
+    } else if (wire == "show_neighbors") {
+      const auto rows = DecodeRows(response);
+      if (rows.empty()) {
+        renderer.Out() << "  (no neighbours heard)\n";
+        return;
+      }
+      Table t;
+      AddColumn(t, "port", Align::Left, Priority::High);
+      AddColumn(t, "chassis", Align::Left, Priority::Medium);
+      AddColumn(t, "system", Align::Left, Priority::High);
+      AddColumn(t, "their port", Align::Left, Priority::High);
+      AddColumn(t, "mgmt address", Align::Left, Priority::Medium);
+      AddColumn(t, "capabilities", Align::Left, Priority::Low);
+      AddColumn(t, "age", Align::Right, Priority::Low);
+      for (const auto &row : rows) {
+        AddRow(t, {
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1), Semantic::Dim},
+            Cell{Field(row, 2), Semantic::Info},
+            Cell{Field(row, 3)},
+            Cell{Field(row, 4)},
+            Cell{Field(row, 5), Semantic::Dim},
+            Cell{Field(row, 6), Semantic::Dim},
+        });
+      }
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_system_services") {
+      Table t;
+      AddColumn(t, "service", Align::Left, Priority::High);
+      AddColumn(t, "state", Align::Left, Priority::High);
+      AddColumn(t, "role", Align::Left, Priority::Medium);
+      for (const auto &row : DecodeRows(response)) {
+        const auto &state = Field(row, 1);
+        AddRow(t, {
+            Cell{Field(row, 0), Semantic::Emphasis},
+            // "DOWN" is the row this command exists for: something the
+            // configuration asks for is not running.
+            Cell{state, state == "running"        ? Semantic::Good
+                        : state == "DOWN"         ? Semantic::Bad
+                        : state == "not configured" ? Semantic::Dim
+                                                  : Semantic::Warn},
+            Cell{Field(row, 2), Semantic::Dim},
+        });
+      }
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_spanning_tree") {
+      // Two tables from one blob: the bridge's summary, then the port
+      // roles. A single field/value table would bury the per-port state
+      // an operator is actually reading this command for.
+      Table summary;
+      AddColumn(summary, "field", Align::Left, Priority::High);
+      AddColumn(summary, "value", Align::Left, Priority::High);
+      Table ports;
+      AddColumn(ports, "port", Align::Left, Priority::High);
+      AddColumn(ports, "role", Align::Left, Priority::High);
+      AddColumn(ports, "state", Align::Left, Priority::High);
+      AddColumn(ports, "cost", Align::Right, Priority::Medium);
+      AddColumn(ports, "edge", Align::Left, Priority::Low);
+      AddColumn(ports, "bpdu-guard", Align::Left, Priority::Medium);
+      bool have_ports = false;
+      for (const auto &row : DecodeRows(response)) {
+        if (Field(row, 0) == "bridge") {
+          auto sem = Semantic::Default;
+          if (Field(row, 1) == "state") sem = Semantic::Warn;
+          AddRow(summary, {Cell{Field(row, 1), Semantic::Emphasis},
+                           Cell{Field(row, 2), sem}});
+          continue;
+        }
+        have_ports = true;
+        const auto &state = Field(row, 3);
+        const auto &guard = Field(row, 6);
+        // A discarding port is the spanning tree DOING ITS JOB, so it
+        // is informational, not bad. A guard-blocked port is bad: it is
+        // out of service until somebody acts.
+        AddRow(ports, {
+            Cell{Field(row, 1), Semantic::Emphasis},
+            Cell{Field(row, 2)},
+            Cell{state, state == "forwarding" ? Semantic::Good
+                        : state == "discarding" ? Semantic::Info
+                                                : Semantic::Warn},
+            Cell{Field(row, 4), Semantic::Dim},
+            Cell{Field(row, 5), Semantic::Dim},
+            Cell{guard, guard == "BLOCKED" ? Semantic::Bad
+                        : guard == "on"    ? Semantic::Info
+                                           : Semantic::Dim},
+        });
+      }
+      RenderFormatted(summary, renderer);
+      if (have_ports) {
+        renderer.Out() << "\n";
+        RenderFormatted(ports, renderer);
+      }
+    } else if (wire == "show_spanning_tree_statistics") {
+      const auto rows = DecodeRows(response);
+      if (rows.empty()) {
+        renderer.Out() << "  (spanning tree is not running)\n";
+        return;
+      }
+      Table t;
+      AddColumn(t, "port", Align::Left, Priority::High);
+      AddColumn(t, "tx_bpdu", Align::Right, Priority::High);
+      AddColumn(t, "rx_bpdu", Align::Right, Priority::High);
+      AddColumn(t, "tx_tcn", Align::Right, Priority::Medium);
+      AddColumn(t, "rx_tcn", Align::Right, Priority::Medium);
+      AddColumn(t, "→fwd", Align::Right, Priority::Low);
+      AddColumn(t, "→blk", Align::Right, Priority::Low);
+      for (const auto &row : rows) {
+        AddRow(t, {
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1)},
+            Cell{Field(row, 2)},
+            Cell{Field(row, 3), Semantic::Dim},
+            Cell{Field(row, 4), Semantic::Dim},
+            Cell{Field(row, 5), Semantic::Dim},
+            Cell{Field(row, 6), Semantic::Dim},
+        });
+      }
+      RenderFormatted(t, renderer);
     } else if (wire == "show_vlans") {
       const auto rows = DecodeRows(response);
       if (rows.empty()) {
@@ -406,15 +596,92 @@ class SwitchAdapter : public ProductAdapter {
       }
       Table t;
       AddColumn(t, "vid", Align::Right, Priority::High);
-      AddColumn(t, "port", Align::Left, Priority::High);
-      AddColumn(t, "untagged", Align::Left, Priority::Medium);
-      AddColumn(t, "pvid", Align::Left, Priority::Medium);
+      AddColumn(t, "name", Align::Left, Priority::High);
+      AddColumn(t, "address", Align::Left, Priority::High);
+      AddColumn(t, "members", Align::Left, Priority::Medium);
       for (const auto &row : rows) {
+        const auto &addr = Field(row, 2);
+        AddRow(t, {
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1), Field(row, 1) == "-" ? Semantic::Dim
+                                                     : Semantic::Info},
+            // An address is what makes a VLAN routed rather than
+            // merely switched, so it should not read as just another
+            // column of text.
+            Cell{addr, addr == "-" ? Semantic::Dim : Semantic::Good},
+            Cell{Field(row, 3)},
+        });
+      }
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_dhcp_leases") {
+      const auto rows = DecodeRows(response);
+      if (rows.empty()) {
+        renderer.Out() << "  (no leases)\n";
+        return;
+      }
+      Table t;
+      AddColumn(t, "address", Align::Left, Priority::High);
+      AddColumn(t, "mac", Align::Left, Priority::High);
+      AddColumn(t, "hostname", Align::Left, Priority::High);
+      AddColumn(t, "expires in", Align::Right, Priority::Medium);
+      for (const auto &row : rows) {
+        const auto &left = Field(row, 3);
+        AddRow(t, {
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1), Semantic::Dim},
+            Cell{Field(row, 2), Semantic::Info},
+            Cell{left, left == "expired" ? Semantic::Warn
+                                         : Semantic::Default},
+        });
+      }
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_dhcp_server") {
+      Table t;
+      AddColumn(t, "pool", Align::Left, Priority::High);
+      AddColumn(t, "range", Align::Left, Priority::High);
+      AddColumn(t, "lease", Align::Right, Priority::Medium);
+      AddColumn(t, "in use", Align::Right, Priority::Medium);
+      for (const auto &row : DecodeRows(response)) {
+        if (Field(row, 0) == "server") {
+          const auto &state = Field(row, 1);
+          AddRow(t, {Cell{"server", Semantic::Emphasis},
+                     Cell{state, state == "running" ? Semantic::Good
+                                                    : Semantic::Bad},
+                     Cell{""}, Cell{""}});
+          continue;
+        }
         AddRow(t, {
             Cell{Field(row, 0), Semantic::Emphasis},
             Cell{Field(row, 1)},
             Cell{Field(row, 2), Semantic::Dim},
-            Cell{Field(row, 3), Semantic::Dim},
+            Cell{Field(row, 3), Semantic::Info},
+        });
+      }
+      RenderFormatted(t, renderer);
+    } else if (wire == "show_route") {
+      Table t;
+      AddColumn(t, "destination", Align::Left, Priority::High);
+      AddColumn(t, "via", Align::Left, Priority::High);
+      AddColumn(t, "interface", Align::Left, Priority::Medium);
+      AddColumn(t, "origin", Align::Left, Priority::Low);
+      for (const auto &row : DecodeRows(response)) {
+        if (Field(row, 0) == "forwarding") {
+          // Routes with forwarding off are a configuration that looks
+          // right and moves no packets; it belongs at the top of the
+          // table, not in a different command.
+          AddRow(t, {Cell{"forwarding", Semantic::Emphasis},
+                     Cell{Field(row, 1), Field(row, 1) == "enabled"
+                                             ? Semantic::Good
+                                             : Semantic::Warn},
+                     Cell{""}, Cell{""}});
+          continue;
+        }
+        AddRow(t, {
+            Cell{Field(row, 0), Semantic::Emphasis},
+            Cell{Field(row, 1)},
+            Cell{Field(row, 2)},
+            Cell{Field(row, 3), Field(row, 3) == "static" ? Semantic::Info
+                                                          : Semantic::Dim},
         });
       }
       RenderFormatted(t, renderer);
@@ -452,6 +719,9 @@ class SwitchAdapter : public ProductAdapter {
           sem = value == "none"      ? Semantic::Good
                 : value.starts_with("unknown") ? Semantic::Warn
                                                : Semantic::Bad;
+        }
+        if (wire == "show_system" && Field(row, 0) == "alarms") {
+          sem = Field(row, 1) == "none" ? Semantic::Good : Semantic::Bad;
         }
         AddRow(t, {Cell{Field(row, 0), Semantic::Emphasis},
                    Cell{Field(row, 1), sem}});
@@ -539,7 +809,10 @@ class SwitchAdapter : public ProductAdapter {
                                     response.data.end());
     } else if (wire == "poe_reset" || wire == "user_add" ||
                wire == "user_remove" || wire == "reboot" ||
-               wire == "clear_counters" || wire == "clear_mac_table") {
+               wire == "clear_counters" || wire == "clear_mac_table" ||
+               wire == "clear_spanning_tree_statistics" ||
+               wire == "clear_bpdu_guard" ||
+               wire == "clear_dhcp_lease") {
       renderer.Out() << "  "
                      << std::string(response.data.begin(),
                                     response.data.end());
@@ -598,7 +871,7 @@ class SwitchAdapter : public ProductAdapter {
       Semantic val_sem = Semantic::Default;
       char marker = 0;
       if (line[0] == '+' || line[0] == '-' || line[0] == '~' ||
-          line[0] == '=') {
+          line[0] == '=' || line[0] == '!') {
         marker = line[0];
         line.erase(0, 1);
         switch (marker) {
@@ -606,6 +879,9 @@ class SwitchAdapter : public ProductAdapter {
           case '-': key_sem = val_sem = Semantic::Bad; break;
           case '~': key_sem = val_sem = Semantic::Warn; break;
           case '=': key_sem = val_sem = Semantic::Dim; break;
+          // Anti-lockout and friends: not a diff line at all, but the
+          // one line in this output an operator must not skim past.
+          case '!': key_sem = val_sem = Semantic::Bad; break;
         }
       }
       const auto eq = line.find('=');

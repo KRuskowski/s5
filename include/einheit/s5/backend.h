@@ -13,6 +13,8 @@
 
 #include <expected>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include "einheit/cli/confd/config_backend.h"
 #include "einheit/cli/error.h"
@@ -44,6 +46,8 @@ class S5Backend : public einheit::cli::confd::ConfigBackend {
   auto ReadRunning() -> einheit::cli::confd::Config override;
   auto Schema() const
       -> const einheit::cli::schema::Schema & override;
+  auto Warnings(const einheit::cli::confd::Candidate &candidate) const
+      -> std::vector<std::string> override;
 
   /// Bring the switch fabric up (bridge + vlan_filtering + enslaved
   /// ports + conduit), idempotently. Apply calls this before touching

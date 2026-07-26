@@ -41,7 +41,18 @@ ok() {
 bad() {
   FAIL=$((FAIL + 1))
   echo "  FAIL  $1"
-  echo "        got: $(echo "$2" | head -2 | tr '\n' ' ')"
+  # The banner is the first thing in every CLI capture and never the
+  # reason for a failure, so showing the head of the output tells you
+  # only that the CLI started. Strip the furniture and show the end,
+  # which is where the error actually is.
+  detail=$(echo "$2" | grep -A2 -iE 'error|refus|reject|fail' \
+    | grep -viE 'errors +.[|│]' | head -6 | tr '\n' ' ')
+  if [ -z "$detail" ]; then
+    detail=$(echo "$2" \
+      | grep -vE '^\s*$|^\+--|^\| einheit|^\| adapter|^\| target|note: no terminal|editing are off' \
+      | tail -6 | tr '\n' ' ')
+  fi
+  echo "        got: $(echo "$detail" | cut -c1-400)"
 }
 
 # assert_in <desc> <needle> <haystack>
@@ -63,6 +74,15 @@ assert_out() {
 commit_set() {
   # commit_set "<set lines>" — one candidate, committed.
   cli "configure\n${1}commit\nexit\nexit\n"
+}
+
+# must_commit "<desc>" "<set lines>" — the same, but ASSERTS the commit
+# landed. A commit sent to /dev/null that quietly failed makes every
+# assertion after it a mystery; this turns the mystery into one failure
+# at the point it happened.
+must_commit() {
+  out=$(commit_set "$2")
+  assert_in "$1" "commit_id" "$out"
 }
 
 echo "== fabric bootstrap (the product builds its own switch)"
@@ -442,6 +462,290 @@ out=$(cli 'show counters lan1\nexit\n')
 assert_in "counters read as cleared" "0" "$out"
 out=$(cli 'clear counters nosuchport\nexit\n')
 assert_in "clear counters rejects an unknown port" "error" "$out"
+
+echo "== RSTP loop protection (WP1.2)"
+must_commit "spanning tree commits" 'set stp.mode rstp\nset stp.priority 4096\nset ports.lan1.stp.edge true\n'
+# stp_state 2 is BR_USER_STP: the kernel has handed spanning tree to a
+# userspace daemon. 1 would be the kernel's own 802.1D, which is what
+# mstpd exists to replace, and the CLI would report "rstp" either way.
+assert_in "bridge is in user-space STP mode" "2" \
+  "$(box 'cat /sys/class/net/br0/bridge/stp_state')"
+assert_in "mstpd runs RSTP" "rstp" \
+  "$(box 'sudo /usr/sbin/mstpctl showbridge br0 | grep "force protocol"')"
+assert_in "bridge priority reached mstpd" "1.000" \
+  "$(box 'sudo /usr/sbin/mstpctl showbridge br0 | grep "bridge id"')"
+assert_in "edge port reached mstpd" "yes" \
+  "$(box 'sudo /usr/sbin/mstpctl showportdetail br0 lan1 | grep "admin edge"')"
+out=$(cli 'show spanning-tree\nexit\n')
+assert_in "show spanning-tree names the protocol" "rstp" "$out"
+assert_in "show spanning-tree lists ports" "lan1" "$out"
+out=$(cli 'show spanning-tree statistics\nexit\n')
+assert_in "BPDU counters render" "lan1" "$out"
+cli 'clear spanning-tree statistics\nexit\n' >/dev/null
+assert_in "statistics baseline clears" "0" \
+  "$(cli 'show spanning-tree statistics lan1\nexit\n')"
+
+# THE loop gate. A dumb bridge in a namespace, two veths into br0:
+# a genuine two-link loop that only spanning tree can break. Contained
+# entirely inside the target, so it runs anywhere without touching the
+# hypervisor's own bridges.
+box '
+  sudo ip netns del s5loop 2>/dev/null
+  sudo ip link del lp1 2>/dev/null
+  sudo ip link del lp2 2>/dev/null
+  sudo ip netns add s5loop
+  sudo ip link add lp1 type veth peer name lp1b
+  sudo ip link add lp2 type veth peer name lp2b
+  sudo ip link set lp1b netns s5loop
+  sudo ip link set lp2b netns s5loop
+  sudo ip netns exec s5loop ip link add hub type bridge
+  sudo ip netns exec s5loop ip link set hub type bridge stp_state 0
+  sudo ip netns exec s5loop ip link set lp1b master hub
+  sudo ip netns exec s5loop ip link set lp2b master hub
+  sudo ip netns exec s5loop ip link set hub up
+  sudo ip netns exec s5loop ip link set lp1b up
+  sudo ip netns exec s5loop ip link set lp2b up
+  sudo ip link set lp1 master br0
+  sudo ip link set lp2 master br0
+  sudo ip link set lp1 up
+  sudo ip link set lp2 up
+  sudo /usr/sbin/mstpctl addbridge br0
+' >/dev/null
+sleep 12
+states=$(box 'sudo /usr/sbin/mstpctl showport br0 | grep -E "lp1|lp2"')
+forwarding=$(echo "$states" | grep -c forw)
+assert_in "exactly one side of the loop forwards" "1" "$forwarding"
+assert_in "the other side is blocked" "disc" "$states"
+# The measurement that makes it a loop test rather than a state
+# inspection: broadcast into the hub with a source MAC the switch does
+# not own, and count what comes back out. A storm is unbounded; a
+# broken loop is a handful of frames.
+before=$(box 'cat /sys/class/net/lp1/statistics/rx_packets')
+box 'sudo ip netns exec s5loop timeout 5 ping -b -c 20 -i 0.05 255.255.255.255 -I hub >/dev/null 2>&1; true' \
+  >/dev/null
+after=$(box 'cat /sys/class/net/lp1/statistics/rx_packets')
+delta=$((after - before))
+echo "    (loop segment carried ${delta} frames with RSTP on)"
+if [ "$delta" -lt 2000 ]; then
+  ok "no broadcast storm with spanning tree on"
+else
+  bad "no broadcast storm with spanning tree on" "${delta} frames"
+fi
+# Killing the forwarding side must hand over to the blocked one.
+fwd=$(echo "$states" | awk '/forw/{print $1}')
+box "sudo ip link set ${fwd} down" >/dev/null
+sleep 8
+after_states=$(box 'sudo /usr/sbin/mstpctl showport br0 | grep -E "lp1|lp2"')
+assert_in "the surviving link takes over" "forw" "$after_states"
+box '
+  sudo ip link del lp1 2>/dev/null
+  sudo ip link del lp2 2>/dev/null
+  sudo ip netns del s5loop 2>/dev/null
+' >/dev/null
+
+out=$(commit_set 'set stp.max_age 40\nset stp.forward_delay 15\n')
+assert_in "an impossible timer triple is refused" "error" "$out"
+out=$(commit_set 'set ports.lan5.stp.edge true\n')
+assert_in "spanning tree on the routed uplink is refused" "error" "$out"
+
+echo "== LLDP (WP1.3)"
+must_commit "LLDP commits" 'set lldp.enabled true\nset lldp.tx_interval 15\n'
+assert_in "the daemon is running" "lldp-daemon" \
+  "$(box "pgrep -af 'einheit_s5 --lldp-daemon'")"
+assert_in "the generated config carries the interval" "tx_interval 15" \
+  "$(box 'sudo cat /var/run/einheit/lldp.conf')"
+assert_in "the generated config says it is generated" "GENERATED" \
+  "$(box 'sudo cat /var/run/einheit/lldp.conf')"
+# We advertise, and it is a real LLDPDU: tcpdump decodes the TLVs by
+# name, which a hand-rolled encoder getting the framing wrong would not
+# survive.
+tx=$(box 'sudo timeout 20 tcpdump -i lan1 -nn -c 1 -v ether proto 0x88cc 2>&1')
+assert_in "we transmit LLDP" "LLDP" "$tx"
+assert_in "the chassis TLV is well-formed" "Chassis ID TLV" "$tx"
+assert_in "we name ourselves" "System Name TLV" "$tx"
+# And we listen. The receive half cannot be driven from inside the box:
+# LLDP is nearest-bridge, so its frames are consumed by the first
+# bridge that sees them and a neighbour has to be on the other end of
+# the actual cable — which, for a VM, is a tap device on the
+# hypervisor. test/lldp_inject.py stands there; run it from the host
+# and re-run this suite with S5_LLDP_PEER=1 to include the assertions.
+# The decode itself is covered exhaustively by the unit tests
+# (S5Lldp.*), including frames built by hand from 802.1AB rather than
+# by our own encoder, and the hostile ones.
+if [ "${S5_LLDP_PEER:-0}" = "1" ]; then
+  out=$(cli 'show neighbors\nexit\n')
+  assert_in "show neighbors names the injected peer" "corridor-sw" "$out"
+  assert_in "show neighbors gives their port" "ge-0/0/7" "$out"
+  assert_in "show neighbors gives their management address" \
+    "10.90.0.254" "$out"
+else
+  echo "  SKIP  neighbour receive (run test/lldp_inject.py on the" \
+       "hypervisor, then re-run with S5_LLDP_PEER=1)"
+fi
+# The table has to render either way, empty or not.
+out=$(cli 'show neighbors\nexit\n')
+# "error" alone would match the session summary's own `errors  0`
+# row, which is present on every capture.
+assert_out "show neighbors never errors" "error  dispatch" "$out"
+
+echo "== SVIs and routing (WP2.1, WP2.2)"
+must_commit "SVIs and forwarding commit" 'set vlans.10.name office\nset vlans.10.address 10.10.0.1/24\nset vlans.20.name lab\nset vlans.20.address 10.20.0.1/24\nset routing.enabled true\n'
+assert_in "the SVI exists" "10.10.0.1/24" \
+  "$(box 'ip -o -4 addr show dev br0.10')"
+# The half everyone forgets: without the bridge's own membership the
+# interface exists, holds its address and receives nothing.
+assert_in "the bridge is a member of the VLAN" "10" \
+  "$(box 'sudo /usr/sbin/bridge vlan show dev br0 self')"
+assert_in "forwarding is on" "1" \
+  "$(box 'cat /proc/sys/net/ipv4/ip_forward')"
+out=$(cli 'show vlans\nexit\n')
+assert_in "show vlans carries the name" "office" "$out"
+assert_in "show vlans carries the address" "10.10.0.1/24" "$out"
+must_commit "the static route commits" 'set routing.static.branch.prefix 192.168.44.0/24\nset routing.static.branch.via 10.20.0.9\n'
+assert_in "the static route is installed" "192.168.44.0/24" \
+  "$(box 'ip -4 route show')"
+out=$(cli 'show route\nexit\n')
+assert_in "show route marks it as ours" "config" "$out"
+# Inter-VLAN routing, end to end, between two namespaces.
+box '
+  for v in 10 20; do
+    sudo ip netns del rt$v 2>/dev/null
+    sudo ip link del r${v}a 2>/dev/null
+    sudo ip netns add rt$v
+    sudo ip link add r${v}a type veth peer name r${v}b
+    sudo ip link set r${v}b netns rt$v
+    sudo ip link set r${v}a master br0
+    sudo ip link set r${v}a up
+    sudo /usr/sbin/bridge vlan add dev r${v}a vid $v pvid untagged
+    sudo /usr/sbin/bridge vlan del dev r${v}a vid 1
+    sudo ip netns exec rt$v ip link set r${v}b up
+    sudo ip netns exec rt$v ip addr add 10.$v.0.9/24 dev r${v}b
+    sudo ip netns exec rt$v ip route add default via 10.$v.0.1
+  done
+' >/dev/null
+sleep 2
+assert_in "a client can reach its own gateway" "0% packet loss" \
+  "$(box 'sudo ip netns exec rt10 ping -c 2 -W 2 10.10.0.1')"
+assert_in "the switch routes between VLANs" "0% packet loss" \
+  "$(box 'sudo ip netns exec rt10 ping -c 3 -W 2 10.20.0.9')"
+# And turning routing off must actually stop it.
+must_commit "forwarding can be turned off" 'set routing.enabled false\n'
+# Asserted positively: "0% packet loss" is a substring of
+# "100% packet loss", so the absence check would pass either way.
+assert_in "with forwarding off it does not" "100% packet loss" \
+  "$(box 'sudo ip netns exec rt10 ping -c 2 -W 2 10.20.0.9')"
+must_commit "and back on" 'set routing.enabled true\n'
+
+echo "== DHCP + DNS (WP2.3)"
+must_commit "two DHCP pools and DNS commit" 'set vlans.10.dhcp.enabled true\nset vlans.10.dhcp.range_start 10.10.0.100\nset vlans.10.dhcp.range_end 10.10.0.120\nset vlans.10.dhcp.lease_time 720\nset vlans.20.dhcp.enabled true\nset vlans.20.dhcp.range_start 10.20.0.100\nset vlans.20.dhcp.range_end 10.20.0.120\nset vlans.20.dhcp.lease_time 60\nset dns.serve true\nset dns.local_domain office.lan\n'
+assert_in "dnsmasq is running against OUR config" "einheit/dnsmasq.conf" \
+  "$(box 'pgrep -a dnsmasq')"
+assert_in "the generated config is marked generated" "GENERATED" \
+  "$(box 'sudo cat /var/run/einheit/dnsmasq.conf')"
+# The gate: each VLAN gets its own pool, and only its own.
+box '
+  for v in 10 20; do
+    sudo ip netns exec rt$v ip addr flush dev r${v}b
+    sudo ip netns exec rt$v timeout 25 busybox udhcpc -i r${v}b -q -n \
+      > /tmp/dhcp$v.log 2>&1
+  done
+' >/dev/null
+assert_in "VLAN 10 gets an address from the VLAN 10 pool" "10.10.0.1" \
+  "$(box 'grep lease /tmp/dhcp10.log')"
+assert_in "VLAN 20 gets an address from the VLAN 20 pool" "10.20.0.1" \
+  "$(box 'grep lease /tmp/dhcp20.log')"
+assert_out "VLAN 20 is NOT served out of the VLAN 10 pool" "10.10.0." \
+  "$(box 'grep lease /tmp/dhcp20.log')"
+assert_in "the lease times differ per pool" "3600" \
+  "$(box 'grep lease /tmp/dhcp20.log')"
+out=$(cli 'show dhcp leases\nexit\n')
+assert_in "show dhcp leases lists a client" "10.10.0.1" "$out"
+out=$(cli 'show dhcp server\nexit\n')
+assert_in "show dhcp server lists the pools" "vlan10" "$out"
+assert_in "show dhcp server reports it running" "running" "$out"
+lease=$(box "grep -o '10\\.10\\.0\\.1[0-9]*' /tmp/dhcp10.log | head -1")
+out=$(cli "clear dhcp lease ${lease}\nexit\n")
+assert_in "clear dhcp lease releases it" "released" "$out"
+assert_out "and it is gone from the database" "$lease" \
+  "$(box 'sudo cat /var/run/einheit/dnsmasq.leases')"
+# DNS forwarding through the switch.
+box '
+  sudo ip netns exec rt10 ip addr add 10.10.0.9/24 dev r10b 2>/dev/null
+  true' >/dev/null
+assert_in "the switch answers DNS" "Address" \
+  "$(box 'sudo ip netns exec rt10 timeout 8 busybox nslookup example.com 10.10.0.1')"
+out=$(commit_set 'set vlans.10.dhcp.range_end 10.99.0.200\n')
+assert_in "a pool outside the VLAN subnet is refused" "error" "$out"
+out=$(commit_set 'set dns.local_domain evil.lan;touch/tmp/pwned\n')
+assert_in "a hostile domain is refused" "error" "$out"
+assert_in "and nothing ran" "no" \
+  "$(box 'test -e /tmp/pwned && echo yes || echo no')"
+
+echo "== mDNS reflection (WP2.4)"
+must_commit "mDNS reflection commits" 'set mdns.enabled true\nset mdns.reflect.10 true\nset mdns.reflect.20 true\n'
+assert_in "the repeater spans VLAN 10" "br0.10" \
+  "$(box 'pgrep -a mdns-repeater')"
+assert_in "the repeater spans VLAN 20" "br0.20" \
+  "$(box 'pgrep -a mdns-repeater')"
+out=$(commit_set 'set mdns.reflect.20 false\n')
+assert_in "reflection across one VLAN is refused" "error" "$out"
+must_commit "mDNS can be turned off" 'set mdns.enabled false\n'
+assert_out "turning it off stops the repeater" "mdns-repeater" \
+  "$(box 'pgrep -a mdns-repeater')"
+
+echo "== NTP serve (WP2.5)"
+must_commit "NTP serving commits" 'set ntp.server 10.55.5.9\nset ntp.serve true\n'
+assert_in "ntpd listens as a server" "-l" \
+  "$(box "tr '\\0' ' ' < /proc/\$(pidof ntpd | cut -d' ' -f1)/cmdline")"
+assert_in "show ntp says it is serving" "yes" \
+  "$(cli 'show ntp\nexit\n')"
+must_commit "NTP serving can be turned off" 'set ntp.serve false\n'
+assert_out "and stops when told to" "-l " \
+  "$(box "tr '\\0' ' ' < /proc/\$(pidof ntpd | cut -d' ' -f1)/cmdline")"
+out=$(cli 'configure\ndelete ntp.server\ny\nset ntp.serve true\ncommit\nexit\nexit\n')
+assert_in "serving without a source is refused" "error" "$out"
+
+echo "== service supervision"
+out=$(cli 'show system services\nexit\n')
+assert_in "services are listed" "dnsmasq" "$out"
+assert_in "and their state" "running" "$out"
+# The row this command exists for: configured, and not running.
+box 'sudo pkill -x dnsmasq' >/dev/null
+sleep 1
+assert_in "a dead-but-wanted service reads as DOWN" "DOWN" \
+  "$(cli 'show system services\nexit\n')"
+cli 'configure\ncommit\nexit\nexit\n' >/dev/null
+assert_in "and a commit brings it back" "running" \
+  "$(cli 'show system services\nexit\n')"
+
+echo "== anti-lockout (WP2.6)"
+# This suite arrives over ssh, so the CLI's own session IS the
+# management path — exactly the case the guard is for.
+out=$(cli 'configure\nset interfaces.lan5.address 10.66.6.1/24\nshow diff\nexit\nexit\n')
+mgmt_dev=$(box "ip route get \$(echo \$SSH_CLIENT | cut -d' ' -f1) 2>/dev/null")
+case "$mgmt_dev" in
+  *lan5*)
+    assert_in "readdressing the management path warns" "warning" "$out"
+    assert_in "and suggests commit confirmed" "commit confirmed" "$out"
+    ;;
+  *)
+    # The suite reaches the box on its management NIC, not on lan5, so
+    # there is nothing for the guard to warn about here. Say so rather
+    # than silently skipping.
+    assert_out "an unrelated interface produces no warning" "warning" \
+      "$out"
+    ;;
+esac
+
+echo "== tear down the services tier"
+cli 'configure\ndelete vlans\ny\ndelete routing\ny\ndelete mdns\ny\ndelete dns.serve\ny\ndelete dns.local_domain\ny\ndelete ntp.serve\ny\ncommit\nexit\nexit\n' \
+  >/dev/null
+box '
+  for v in 10 20; do
+    sudo ip netns del rt$v 2>/dev/null
+    sudo ip link del r${v}a 2>/dev/null
+  done
+' >/dev/null
 
 echo "== restore test defaults"
 commit_set 'set hostname s5-test\nset dns.primary 9.9.9.9\nset dns.secondary 1.1.1.1\nset interfaces.lan5.address 10.55.5.1/24\n' \

@@ -48,6 +48,29 @@ auto SetInterfaceAddr(const std::string &iface,
                       const std::string &addr) -> bool;
 auto SetInterfaceDhcp(const std::string &iface) -> bool;
 
+/// How the session issuing a command reaches this box.
+///
+/// A remote operator's commands arrive over a path made of exactly the
+/// things they are about to reconfigure: an address, an interface, a
+/// VLAN, a route. Knowing which ones is what lets the switch warn
+/// before it cuts the branch it is sitting on.
+struct MgmtPath {
+  /// The far end of this session; empty on a local console, where
+  /// there is nothing to lose.
+  std::string peer;
+  /// Netdev the box would answer the peer through.
+  std::string device;
+  /// Our own address on that path.
+  std::string address;
+  /// Whether the peer is off-subnet, so the answer needs a route.
+  bool routed = false;
+};
+
+/// Work out the current session's management path from SSH_CONNECTION
+/// and the routing table.
+/// @returns The path, with an empty peer when there is none to find.
+auto GetManagementPath() -> MgmtPath;
+
 // ── DNS ─────────────────────────────────────────────────────
 
 auto GetDnsServers() -> std::vector<std::string>;
@@ -62,7 +85,18 @@ struct NtpStatus {
   std::string offset;
 };
 auto GetNtpStatus() -> NtpStatus;
-auto SetNtpServer(const std::string &server) -> bool;
+
+/// Point the box's time daemon at `server`, optionally also answering
+/// queries from clients. One daemon does both (busybox ntpd's `-l`),
+/// so they are set together: a box that served time it had never
+/// synchronised would be worse than one that served none.
+/// @param server Upstream NTP server.
+/// @param serve Whether to also answer client queries.
+/// @returns Whether the daemon is running afterwards.
+auto SetNtpServer(const std::string &server, bool serve) -> bool;
+
+/// Whether the running time daemon is also answering clients.
+auto GetNtpServing() -> bool;
 
 // ── Users ───────────────────────────────────────────────────
 

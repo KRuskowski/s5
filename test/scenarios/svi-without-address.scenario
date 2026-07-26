@@ -1,0 +1,13 @@
+# Naming a VLAN is not the same as routing for it. A name alone must
+# NOT grow an interface — otherwise the switch quietly puts itself in
+# every VLAN somebody bothered to label.
+[config]
+vlans.30.name cameras
+ports.lan3.vlan.30 untagged-pvid
+[delete]
+ports.lan3.vlan.1
+[expect-box]
+test -e /sys/class/net/br0.30 && echo present || echo absent :: ^absent$
+[expect-cli]
+show vlans :: cameras
+show vlans :: 30
