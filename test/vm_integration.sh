@@ -310,6 +310,139 @@ assert_in "second boot restores, does not reseed" "restored commit" "$out"
 assert_out "no reseed on the second boot" "seeded factory" "$out"
 assert_in "operator config survived" "after-seed" "$(box hostname)"
 
+echo "== boot report (boot outcome is state, so it has a show verb)"
+box 'sudo einheit_s5 --apply-boot' >/dev/null
+out=$(cli 'show system boot\nexit\n')
+assert_in "boot report says it ran this boot" "yes" "$out"
+assert_in "boot report names the applied revision" "applied_revision" "$out"
+assert_in "boot report records the fabric step" "step.fabric" "$out"
+assert_in "boot report records the config-apply step" "step.config-ap" \
+  "$out"
+assert_in "show system has a divergence row" "config-divergence" \
+  "$(cli 'show system\nexit\n')"
+assert_in "no divergence on a clean boot" "none" \
+  "$(cli 'show system\nexit\n' | grep -i divergence)"
+
+echo "== boot report catches a boot where the unit never ran"
+# The systemd-ordering-cycle class: a stale report must not read as a
+# healthy boot. Forge an earlier boot id rather than rebooting, so this
+# stays a single-pass test.
+box 'sudo sed -i "s/^BOOT_ID .*/BOOT_ID forged-earlier-boot/" \
+  /var/lib/einheit/s5/boot.report' >/dev/null
+out=$(cli 'show system boot\nexit\n')
+assert_in "stale report is flagged" "no" "$out"
+assert_in "stale report warns it is from an earlier boot" "EARLIER" "$out"
+assert_in "divergence is unknown, not 'none', when boot did not run" \
+  "unknown" "$(cli 'show system\nexit\n' | grep -i divergence)"
+box 'sudo einheit_s5 --apply-boot' >/dev/null
+
+echo "== rescue configuration (WP0.5)"
+commit_set 'set hostname rescue-known-good\nset dns.primary 192.0.2.77\n' \
+  >/dev/null
+out=$(cli 'save rescue\nexit\n')
+assert_in "save rescue writes the slot" "saved" "$out"
+assert_in "rescue lives beside the state, not in configs" "einheit-config" \
+  "$(box 'sudo cat /var/lib/einheit/s5/rescue.conf')"
+assert_out "rescue is not an ordinary saved config" "rescue" \
+  "$(box 'sudo ls /var/lib/einheit/s5/configs/ 2>/dev/null')"
+assert_in "show configs reports the rescue slot" "rescue" \
+  "$(cli 'show configs\nexit\n')"
+# A hostile config: commits cleanly, leaves the box wrong.
+commit_set 'set hostname hostile-box\nset dns.primary 192.0.2.1\nset ports.lan1.enabled false\n' \
+  >/dev/null
+assert_in "hostile config landed" "hostile-box" "$(box hostname)"
+out=$(cli 'rollback rescue\ny\nexit\n')
+assert_in "rollback rescue commits" "commit_id" "$out"
+assert_in "rescue restored the hostname" "rescue-known-good" \
+  "$(box hostname)"
+assert_in "rescue restored DNS" "192.0.2.77" \
+  "$(box 'cat /etc/resolv.conf')"
+assert_in "rescue restored the port" ",UP" \
+  "$(box 'ip link show lan1 | head -1 | tr -d " "')"
+# Rescue must outlive a factory reset by design.
+cli 'configure\nload factory\ncommit\nexit\nexit\n' >/dev/null
+assert_in "rescue survives load factory" "einheit-config" \
+  "$(box 'sudo cat /var/lib/einheit/s5/rescue.conf')"
+out=$(cli 'rollback rescue\ny\nexit\n')
+assert_in "rescue still restores after a factory reset" "commit_id" "$out"
+assert_in "box is known-good again" "rescue-known-good" "$(box hostname)"
+
+echo "== port parameters (WP1.1)"
+commit_set 'set ports.lan1.mtu 9000\n' >/dev/null
+assert_in "MTU applies" "9000" "$(box 'cat /sys/class/net/lan1/mtu')"
+# The DSA invariant: the conduit carries every user frame plus the
+# switch tag, so it must be at least as large. Parsing a rendered table
+# needs the ANSI escapes and the semantic markers ([OK]/[WARN]) stripped
+# first, or the "value" is a pile of terminal control codes.
+conduit=$(cli 'show fabric\nexit\n' |
+  sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' |
+  awk -F'│' '/conduit/ { print $2; exit }' |
+  sed -e 's/\[[A-Za-z-]*\]//g' -e 's/[[:space:]]//g')
+if [ -n "$conduit" ] && [ "$conduit" != "-" ]; then
+  cmtu=$(box "cat /sys/class/net/${conduit}/mtu")
+  if [ "${cmtu:-0}" -ge 9008 ]; then
+    ok "conduit ${conduit} MTU raised to ${cmtu} (>= 9000 + tag)"
+  else
+    bad "conduit ${conduit} MTU covers the user MTU" "got ${cmtu:-unset}"
+  fi
+else
+  ok "no DSA conduit on this target — invariant not applicable"
+fi
+commit_set 'set ports.lan1.mtu 1500\n' >/dev/null
+assert_in "MTU change applies" "1500" "$(box 'cat /sys/class/net/lan1/mtu')"
+out=$(cli 'show interfaces detail lan1\nexit\n')
+assert_in "detail shows configured vs negotiated" "negotiated" "$out"
+assert_in "detail shows the MTU" "1500" "$out"
+out=$(commit_set 'set ports.lan1.mtu 70000\n')
+assert_in "out-of-range MTU is rejected" "error" "$out"
+
+echo "== static MACs + aging (WP1.4)"
+commit_set 'set mac.aging_time 600\nset mac.static.aa:bb:cc:dd:ee:01.port lan1\nset mac.static.aa:bb:cc:dd:ee:01.vlan 1\n' \
+  >/dev/null
+assert_in "ageing time applies (seconds -> centiseconds)" "60000" \
+  "$(box 'cat /sys/class/net/br0/bridge/ageing_time')"
+assert_in "static entry is in the fdb" "lan1" \
+  "$(box 'sudo /usr/sbin/bridge fdb show | grep aa:bb:cc:dd:ee:01')"
+out=$(cli 'show mac-table\nexit\n')
+assert_in "show mac-table lists it" "aa:bb:cc:dd:ee:01" "$out"
+assert_in "show mac-table marks it static" "static" "$out"
+# The load-bearing property: an operational verb must not delete config.
+cli 'clear mac-table\nexit\n' >/dev/null
+assert_in "static entry survives clear mac-table" "aa:bb:cc:dd:ee:01" \
+  "$(box 'sudo /usr/sbin/bridge fdb show | grep aa:bb:cc:dd:ee:01')"
+# The candidate owns the full static set.
+cli 'configure\ndelete mac.static.aa:bb:cc:dd:ee:01.port\ny\ndelete mac.static.aa:bb:cc:dd:ee:01.vlan\ny\ncommit\nexit\nexit\n' \
+  >/dev/null
+assert_out "removing it from config removes it from the box" \
+  "aa:bb:cc:dd:ee:01" \
+  "$(box 'sudo /usr/sbin/bridge fdb show')"
+out=$(commit_set 'set mac.static.not-a-mac.port lan1\n')
+assert_in "a malformed MAC is rejected" "error" "$out"
+
+echo "== IGMP snooping (WP1.7)"
+commit_set 'set igmp_snooping.enabled true\nset igmp_snooping.querier true\n' \
+  >/dev/null
+assert_in "snooping enabled on the bridge" "1" \
+  "$(box 'cat /sys/class/net/br0/bridge/multicast_snooping')"
+assert_in "querier enabled on the bridge" "1" \
+  "$(box 'cat /sys/class/net/br0/bridge/multicast_querier')"
+out=$(cli 'show igmp-snooping\nexit\n')
+assert_in "show igmp-snooping reports it" "enabled" "$out"
+commit_set 'set igmp_snooping.querier false\n' >/dev/null
+assert_in "querier can be turned back off" "0" \
+  "$(box 'cat /sys/class/net/br0/bridge/multicast_querier')"
+
+echo "== counters detail + clear (WP1.8)"
+box 'ping -c 2 -W 1 127.0.0.1 >/dev/null 2>&1; true' >/dev/null
+out=$(cli 'show counters lan1\nexit\n')
+assert_in "counters render" "lan1" "$out"
+cli 'clear counters lan1\nexit\n' >/dev/null
+out=$(cli 'show counters lan1\nexit\n')
+# The kernel cannot zero these; clear is a baseline the reads subtract.
+assert_in "counters read as cleared" "0" "$out"
+out=$(cli 'clear counters nosuchport\nexit\n')
+assert_in "clear counters rejects an unknown port" "error" "$out"
+
 echo "== restore test defaults"
 commit_set 'set hostname s5-test\nset dns.primary 9.9.9.9\nset dns.secondary 1.1.1.1\nset interfaces.lan5.address 10.55.5.1/24\n' \
   >/dev/null

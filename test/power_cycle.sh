@@ -90,9 +90,12 @@ wait_for_boot_unit() {
 }
 
 # A configuration distinctive enough that a factory-default box cannot
-# pass by accident: a hostname, a shut port, and a non-default VLAN.
+# pass by accident, and covering every config FAMILY: identity, port
+# admin state, VLAN membership, link parameters, the MAC table and
+# multicast snooping. A new family that does not survive a power cut is
+# no more shipped than one that was never written.
 echo "== commit the configuration under test"
-printf '%b' 'configure\nset hostname power-soak\nset ports.lan3.enabled false\nset ports.lan1.vlan.77 untagged-pvid\ncommit\nexit\nexit\n' |
+printf '%b' 'configure\nset hostname power-soak\nset ports.lan3.enabled false\nset ports.lan1.vlan.77 untagged-pvid\nset ports.lan1.mtu 9000\nset mac.aging_time 600\nset mac.static.aa:bb:cc:dd:ee:01.port lan1\nset mac.static.aa:bb:cc:dd:ee:01.vlan 1\nset igmp_snooping.enabled true\ncommit\nexit\nexit\n' |
   ssh "$HOST" 'sudo einheit_s5' >/dev/null 2>&1
 assert_in "hostname committed" "power-soak" "$(box hostname)"
 commits_before=$(box 'sudo grep -c "^COMMIT " /var/lib/einheit/s5/confd.state')
@@ -139,6 +142,17 @@ for cycle in $(seq 1 "$CYCLES"); do
     "$(box 'ip link show lan3 | head -1')"
   assert_in "cycle ${cycle}: VLAN 77 restored" "77 PVID Egress Untagged" \
     "$(box 'sudo /usr/sbin/bridge vlan show' | tr -s ' ')"
+  assert_in "cycle ${cycle}: port MTU restored" "9000" \
+    "$(box 'cat /sys/class/net/lan1/mtu')"
+  assert_in "cycle ${cycle}: MAC ageing restored" "60000" \
+    "$(box 'cat /sys/class/net/br0/bridge/ageing_time')"
+  assert_in "cycle ${cycle}: static MAC restored" "aa:bb:cc:dd:ee:01" \
+    "$(box 'sudo /usr/sbin/bridge fdb show | grep aa:bb:cc:dd:ee:01')"
+  assert_in "cycle ${cycle}: IGMP snooping restored" "1" \
+    "$(box 'cat /sys/class/net/br0/bridge/multicast_snooping')"
+  assert_in "cycle ${cycle}: boot report says it ran this boot" "yes" \
+    "$(printf 'show system boot\nexit\n' | ssh "$HOST" 'sudo einheit_s5' \
+       2>/dev/null | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep ran_this_boot)"
 done
 
 # Boot-restore re-applies an existing commit; it must not record a new

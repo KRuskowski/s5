@@ -1,0 +1,21 @@
+# WP1.1: per-port link parameters. MTU is the VM-provable half.
+#
+# Forced speed/duplex and flow-control are BENCH tier: they need a real
+# PHY with a peer, and the VM's virtio NICs reject `ethtool -s` and
+# `ethtool -A` outright. That rejection is correct behaviour — an
+# operator asking for something the hardware cannot do gets an error —
+# so those paths are exercised in the unit tests against the fake box
+# and left for the bench target here.
+#
+# Raising a user port's MTU must raise the DSA conduit first, or frames
+# above the conduit MTU are silently dropped on the CPU path.
+[config]
+ports.lan1.mtu 9000
+ports.lan2.mtu 1500
+[expect-box]
+cat /sys/class/net/lan1/mtu :: 9000
+cat /sys/class/net/lan2/mtu :: 1500
+[expect-cli]
+show interfaces detail lan1 :: 9000
+show interfaces detail lan1 :: negotiated
+show config ports.lan1 :: 9000

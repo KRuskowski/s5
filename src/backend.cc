@@ -80,6 +80,25 @@ config:
           type: boolean
           default: "true"
           help: "Administrative port state (lan1..lan5, wan)"
+        speed:
+          type: enum
+          values: [auto, "10", "100", "1000"]
+          default: "auto"
+          help: "Link speed in Mbit/s, or auto-negotiate"
+        duplex:
+          type: enum
+          values: [auto, half, full]
+          default: "auto"
+          help: "Duplex mode, or auto-negotiate"
+        mtu:
+          type: integer
+          range: [1280, 9216]
+          default: "1500"
+          help: "Maximum transmission unit"
+        flow_control:
+          type: boolean
+          default: "false"
+          help: "802.3x pause frames"
         vlan:
           type: map
           key: integer
@@ -87,6 +106,42 @@ config:
             type: enum
             values: [tagged, untagged, pvid, untagged-pvid]
             help: "802.1Q membership mode for this VID"
+
+  mac:
+    type: object
+    fields:
+      aging_time:
+        type: integer
+        range: [10, 1000000]
+        default: "300"
+        help: "Seconds before a learned MAC is forgotten"
+      static:
+        type: map
+        key: string
+        value:
+          type: object
+          fields:
+            port:
+              type: string
+              help: "Port the static entry points at"
+              example: "lan1"
+            vlan:
+              type: integer
+              range: [1, 4094]
+              default: "1"
+              help: "VLAN the static entry belongs to"
+
+  igmp_snooping:
+    type: object
+    fields:
+      enabled:
+        type: boolean
+        default: "true"
+        help: "Prune multicast to ports that asked for it"
+      querier:
+        type: boolean
+        default: "false"
+        help: "Send IGMP queries (needed with no router on the L2)"
 
   poe:
     type: map
@@ -105,6 +160,11 @@ config:
 
 types: {}
 )yaml";
+
+/// DSA switch-tag bytes the conduit must carry on top of a user
+/// port's MTU. The ksz9477 tag is 4 bytes; 8 leaves room for the
+/// VLAN tag that rides with it rather than cutting it fine.
+constexpr int kDsaTagOverhead = 8;
 
 auto Trim(std::string s) -> std::string {
   while (!s.empty() && std::isspace(
@@ -189,6 +249,40 @@ auto VlanModeName(bool untagged, bool pvid) -> std::string {
   return "tagged";
 }
 
+auto ParseInt(const std::string &s) -> std::optional<int> {
+  if (s.empty() || s.size() > 9) return std::nullopt;
+  int out = 0;
+  for (char c : s) {
+    if (!std::isdigit(static_cast<unsigned char>(c))) {
+      return std::nullopt;
+    }
+    out = out * 10 + (c - '0');
+  }
+  return out;
+}
+
+auto Lower(std::string s) -> std::string {
+  for (char &c : s) {
+    c = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(c)));
+  }
+  return s;
+}
+
+/// aa:bb:cc:dd:ee:ff. Checked here rather than trusting the schema's
+/// string type, because this value is interpolated into a shell line.
+auto ValidMac(const std::string &s) -> bool {
+  if (s.size() != 17) return false;
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (i % 3 == 2) {
+      if (s[i] != ':') return false;
+    } else if (std::isxdigit(static_cast<unsigned char>(s[i])) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 auto ParseVid(const std::string &s) -> std::optional<int> {
   if (s.empty() || s.size() > 4) return std::nullopt;
   int vid = 0;
@@ -216,6 +310,25 @@ struct Plan {
   std::vector<std::string> dns;
   std::optional<std::string> ntp_server;
   std::map<std::string, bool> ports;
+  /// Per-port link parameters (WP1.1). Only the fields the candidate
+  /// mentions are set; the rest stay nullopt and are left alone.
+  struct PortLink {
+    std::optional<std::string> speed;
+    std::optional<std::string> duplex;
+    std::optional<int> mtu;
+    std::optional<bool> flow_control;
+  };
+  std::map<std::string, PortLink> port_links;
+  /// Static fdb entries: mac → (port, vid). The candidate owns the
+  /// full set, so entries on the box that are not listed are removed.
+  struct StaticMac {
+    std::string port;
+    int vid = 1;
+  };
+  std::map<std::string, StaticMac> static_macs;
+  std::optional<int> mac_aging;
+  std::optional<bool> igmp_snooping;
+  std::optional<bool> igmp_querier;
   /// Desired VLAN membership per port: vid → mode. A port present
   /// here owns its full membership set — VIDs on the box but not
   /// listed are removed on apply.
@@ -290,6 +403,89 @@ auto BuildPlan(const Candidate &candidate)
                     std::format("invalid value at '{}'", path));
       }
       plan.ports[seg[1]] = *b;
+    } else if (seg.size() == 3 && seg[0] == "ports" &&
+               (seg[2] == "speed" || seg[2] == "duplex" ||
+                seg[2] == "mtu" || seg[2] == "flow_control")) {
+      if (!SafeToken(seg[1])) {
+        return Fail(ApplyError::ValidationFailed,
+                    std::format("invalid port name at '{}'", path));
+      }
+      auto &link = plan.port_links[seg[1]];
+      if (seg[2] == "speed") {
+        if (value != "auto" && value != "10" && value != "100" &&
+            value != "1000") {
+          return Fail(ApplyError::ValidationFailed,
+                      std::format("'{}': expected auto|10|100|1000",
+                                  path));
+        }
+        link.speed = value;
+      } else if (seg[2] == "duplex") {
+        if (value != "auto" && value != "half" && value != "full") {
+          return Fail(ApplyError::ValidationFailed,
+                      std::format("'{}': expected auto|half|full", path));
+        }
+        link.duplex = value;
+      } else if (seg[2] == "mtu") {
+        const auto mtu = ParseInt(value);
+        if (!mtu || *mtu < 1280 || *mtu > 9216) {
+          return Fail(ApplyError::ValidationFailed,
+                      std::format("'{}': MTU range is 1280-9216", path));
+        }
+        link.mtu = *mtu;
+      } else {
+        const auto b = ParseBool(value);
+        if (!b) {
+          return Fail(ApplyError::ValidationFailed,
+                      std::format("'{}': expected true|false", path));
+        }
+        link.flow_control = *b;
+      }
+    } else if (seg.size() == 2 && seg[0] == "mac" &&
+               seg[1] == "aging_time") {
+      const auto secs = ParseInt(value);
+      if (!secs || *secs < 10 || *secs > 1000000) {
+        return Fail(ApplyError::ValidationFailed,
+                    std::format("'{}': range is 10-1000000", path));
+      }
+      plan.mac_aging = *secs;
+    } else if (seg.size() == 4 && seg[0] == "mac" &&
+               seg[1] == "static") {
+      if (!ValidMac(seg[2])) {
+        return Fail(ApplyError::ValidationFailed,
+                    std::format("'{}': not a MAC address", path));
+      }
+      auto &entry = plan.static_macs[Lower(seg[2])];
+      if (seg[3] == "port") {
+        if (!SafeToken(value)) {
+          return Fail(ApplyError::ValidationFailed,
+                      std::format("invalid port at '{}'", path));
+        }
+        entry.port = value;
+      } else if (seg[3] == "vlan") {
+        const auto vid = ParseVid(value);
+        if (!vid) {
+          return Fail(ApplyError::ValidationFailed,
+                      std::format("'{}': VID must be 1-4094", path));
+        }
+        entry.vid = *vid;
+      } else {
+        return Fail(ApplyError::ValidationFailed,
+                    std::format("unknown path '{}'", path));
+      }
+    } else if (seg.size() == 2 && seg[0] == "igmp_snooping") {
+      const auto b = ParseBool(value);
+      if (!b) {
+        return Fail(ApplyError::ValidationFailed,
+                    std::format("'{}': expected true|false", path));
+      }
+      if (seg[1] == "enabled") {
+        plan.igmp_snooping = *b;
+      } else if (seg[1] == "querier") {
+        plan.igmp_querier = *b;
+      } else {
+        return Fail(ApplyError::ValidationFailed,
+                    std::format("unknown path '{}'", path));
+      }
     } else if (seg.size() == 4 && seg[0] == "ports" &&
                seg[2] == "vlan") {
       const auto vid = ParseVid(seg[3]);
@@ -473,6 +669,141 @@ auto S5Backend::Apply(const Candidate &candidate)
       }
     }
   }
+  // Port link parameters. The conduit-MTU invariant comes first: on
+  // DSA the CPU-port netdev carries every user port's traffic plus the
+  // switch tag, so a user MTU above the conduit's is silently dropped
+  // on the CPU path. Raise the conduit before raising a user port, and
+  // never lower it below what a user port already needs.
+  if (!plan->port_links.empty()) {
+    int max_user_mtu = 0;
+    for (const auto &[name, link] : plan->port_links) {
+      if (link.mtu) max_user_mtu = std::max(max_user_mtu, *link.mtu);
+    }
+    const auto topo = fabric::S5Topology();
+    for (const auto &member : topo.members) {
+      if (plan->port_links.contains(member)) continue;
+      // Ports the candidate does not mention still ride the conduit.
+      max_user_mtu = std::max(max_user_mtu,
+                              dsa::GetPortParams(member).mtu);
+    }
+    if (max_user_mtu > 0) {
+      const auto conduit = fabric::GetStatus(topo).conduit;
+      if (!conduit.empty()) {
+        const int needed = max_user_mtu + kDsaTagOverhead;
+        if (dsa::GetPortParams(conduit).mtu < needed) {
+          if (!dsa::SetPortMtu(conduit, needed)) {
+            return fail(std::format(
+                "raising conduit {} MTU to {} failed", conduit, needed));
+          }
+          applied = true;
+        }
+      }
+    }
+    for (const auto &[name, link] : plan->port_links) {
+      // Every write below is guarded by a read: the candidate is seeded
+      // from running, so a commit that changes one unrelated path would
+      // otherwise re-issue an ethtool call for every port on the box.
+      // Beyond being wasteful, that fails outright on hardware whose
+      // driver has no ethtool ops — an `auto` -> `auto` no-op must
+      // never be able to fail a commit.
+      const auto current = dsa::GetPortParams(name);
+      if (link.mtu && *link.mtu != current.mtu) {
+        if (!dsa::SetPortMtu(name, *link.mtu)) {
+          return fail(std::format("MTU on {} failed", name));
+        }
+        applied = true;
+      }
+      if (link.speed || link.duplex) {
+        // ethtool will not force one half of the pair; resolve both
+        // from the candidate, defaulting the unmentioned half to what
+        // the box already has.
+        const auto speed = link.speed.value_or(current.speed);
+        const auto duplex = link.duplex.value_or(current.duplex);
+        if (speed != current.speed || duplex != current.duplex) {
+          if (!dsa::SetPortSpeedDuplex(name, speed, duplex)) {
+            return fail(std::format(
+                "speed/duplex on {} failed (forcing needs both)", name));
+          }
+          applied = true;
+        }
+      }
+      if (link.flow_control && *link.flow_control != current.flow_control) {
+        if (!dsa::SetPortFlowControl(name, *link.flow_control)) {
+          return fail(std::format("flow control on {} failed", name));
+        }
+        applied = true;
+      }
+    }
+  }
+
+  // MAC ageing and static entries.
+  if (plan->mac_aging) {
+    if (!dsa::SetMacAging(fabric::S5Topology().bridge, *plan->mac_aging)) {
+      return fail("MAC ageing time write failed");
+    }
+    applied = true;
+  }
+  {
+    // The candidate owns the full static set: entries on the box that
+    // the configuration no longer names are removed, the same way VLAN
+    // membership reconciles.
+    const auto live = dsa::GetMacTable();
+    for (const auto &e : live) {
+      if (!e.is_static) continue;
+      // The bridge installs permanent entries of its own — each port's
+      // own address, and the multicast groups it joins. They look
+      // exactly like configured static entries. Trying to reconcile
+      // them away fails the delete and takes the whole apply (and
+      // therefore every boot) down with it.
+      if (e.is_local || e.is_multicast) continue;
+      const auto want = plan->static_macs.find(Lower(e.mac));
+      const bool keep = want != plan->static_macs.end() &&
+                        want->second.port == e.port &&
+                        want->second.vid == e.vid;
+      if (keep) continue;
+      if (!dsa::DelStaticMac(e.mac, e.port, e.vid)) {
+        return fail(std::format("removing static MAC {} failed", e.mac));
+      }
+      applied = true;
+    }
+    for (const auto &[mac, entry] : plan->static_macs) {
+      if (entry.port.empty()) {
+        return Fail(ApplyError::ValidationFailed,
+                    std::format("mac.static.{}: no port set", mac));
+      }
+      const bool present = std::any_of(
+          live.begin(), live.end(), [&](const auto &e) {
+            return e.is_static && Lower(e.mac) == mac &&
+                   e.port == entry.port && e.vid == entry.vid;
+          });
+      if (present) continue;
+      if (!dsa::AddStaticMac(mac, entry.port,
+                             static_cast<std::uint16_t>(entry.vid))) {
+        return fail(std::format("adding static MAC {} on {} failed", mac,
+                                entry.port));
+      }
+      applied = true;
+    }
+  }
+
+  // IGMP snooping.
+  if (plan->igmp_snooping || plan->igmp_querier) {
+    const auto bridge = fabric::S5Topology().bridge;
+    const auto live = dsa::GetSnooping(bridge);
+    if (plan->igmp_snooping && *plan->igmp_snooping != live.enabled) {
+      if (!dsa::SetSnooping(bridge, *plan->igmp_snooping)) {
+        return fail("IGMP snooping write failed");
+      }
+      applied = true;
+    }
+    if (plan->igmp_querier && *plan->igmp_querier != live.querier) {
+      if (!dsa::SetQuerier(bridge, *plan->igmp_querier)) {
+        return fail("IGMP querier write failed");
+      }
+      applied = true;
+    }
+  }
+
   for (const auto &[port, poe] : plan->poe) {
     if (poe.enabled) {
       if (!poe::SetPortEnabled(port, *poe.enabled)) {
@@ -508,10 +839,41 @@ auto S5Backend::ReadRunning() -> Config {
     running["ntp.server"] = ntp;
   }
   const auto ports = dsa::DiscoverPorts();
+  const auto topo = fabric::S5Topology();
   for (const auto &name : ports) {
     const auto st = dsa::GetPortStatus(name);
     running[std::format("ports.{}.enabled", name)] =
         st.enabled ? "true" : "false";
+    // Link parameters read back so boot-restore and the reconcile
+    // overlay see them like every other config family.
+    const auto link = dsa::GetPortParams(name);
+    running[std::format("ports.{}.speed", name)] = link.speed;
+    running[std::format("ports.{}.duplex", name)] = link.duplex;
+    if (link.mtu > 0) {
+      running[std::format("ports.{}.mtu", name)] =
+          std::to_string(link.mtu);
+    }
+    running[std::format("ports.{}.flow_control", name)] =
+        link.flow_control ? "true" : "false";
+  }
+  if (const auto aging = dsa::GetMacAging(topo.bridge); aging > 0) {
+    running["mac.aging_time"] = std::to_string(aging);
+  }
+  for (const auto &e : dsa::GetMacTable()) {
+    if (!e.is_static || e.is_local || e.is_multicast) continue;
+    // Only switch ports: the bridge's own permanent entry is not a
+    // configured static MAC.
+    if (std::find(ports.begin(), ports.end(), e.port) == ports.end()) {
+      continue;
+    }
+    running[std::format("mac.static.{}.port", Lower(e.mac))] = e.port;
+    running[std::format("mac.static.{}.vlan", Lower(e.mac))] =
+        std::to_string(e.vid);
+  }
+  if (fabric::GetStatus(topo).exists) {
+    const auto snoop = dsa::GetSnooping(topo.bridge);
+    running["igmp_snooping.enabled"] = snoop.enabled ? "true" : "false";
+    running["igmp_snooping.querier"] = snoop.querier ? "true" : "false";
   }
   for (const auto &v : dsa::GetVlans()) {
     // Only switch ports — `bridge vlan show` also lists the bridge

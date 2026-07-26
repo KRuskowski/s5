@@ -45,6 +45,14 @@ struct MacEntry {
   std::string mac;
   std::string port;
   std::uint16_t vid = 0;
+  /// Permanent (configured) rather than learned.
+  bool is_static = false;
+  /// The port's OWN address, installed by the bridge rather than by
+  /// anyone's configuration. Reconciliation must never touch these.
+  bool is_local = false;
+  /// Group/multicast address (the I/G bit in the first octet). The
+  /// kernel manages these; they are not operator configuration.
+  bool is_multicast = false;
 };
 
 /// Discover DSA switch ports. Returns netdev names like
@@ -81,8 +89,79 @@ auto AddVlan(const std::string &port, std::uint16_t vid,
 auto DelVlan(const std::string &port, std::uint16_t vid)
     -> bool;
 
-/// Read dynamic MAC table via bridge fdb show.
+/// Read the MAC table via bridge fdb show. Includes static entries,
+/// distinguished by MacEntry::is_static.
 auto GetMacTable() -> std::vector<MacEntry>;
+
+// ── Port parameters (WP1.1) ─────────────────────────────────────
+
+/// Link settings as configured and as negotiated.
+struct PortParams {
+  /// "auto", or a speed in Mbit/s.
+  std::string speed = "auto";
+  /// "auto", "half" or "full".
+  std::string duplex = "auto";
+  /// Current MTU.
+  int mtu = 0;
+  /// Whether 802.3x pause is on.
+  bool flow_control = false;
+  /// What autoneg actually settled on, for `show interfaces detail`.
+  std::string negotiated_speed;
+  std::string negotiated_duplex;
+};
+
+/// Read a port's link parameters.
+auto GetPortParams(const std::string &port) -> PortParams;
+
+/// Set speed/duplex via ethtool. "auto" for either turns autoneg on;
+/// a forced value turns it off, and BOTH must then be concrete —
+/// ethtool rejects a half-configured forced link.
+auto SetPortSpeedDuplex(const std::string &port,
+                        const std::string &speed,
+                        const std::string &duplex) -> bool;
+
+/// Set the MTU of a netdev.
+auto SetPortMtu(const std::string &port, int mtu) -> bool;
+
+/// Enable or disable 802.3x pause frames.
+auto SetPortFlowControl(const std::string &port, bool on) -> bool;
+
+// ── MAC table (WP1.4) ───────────────────────────────────────────
+
+/// Add a permanent fdb entry.
+auto AddStaticMac(const std::string &mac, const std::string &port,
+                  std::uint16_t vid) -> bool;
+
+/// Remove a permanent fdb entry.
+auto DelStaticMac(const std::string &mac, const std::string &port,
+                  std::uint16_t vid) -> bool;
+
+/// Bridge MAC ageing time, in seconds.
+auto GetMacAging(const std::string &bridge) -> int;
+auto SetMacAging(const std::string &bridge, int seconds) -> bool;
+
+/// Flush learned (dynamic) entries, optionally on one port only.
+/// Static entries are configuration and are never flushed.
+auto FlushMacTable(const std::string &port) -> bool;
+
+// ── IGMP snooping (WP1.7) ───────────────────────────────────────
+
+/// Bridge multicast-snooping state.
+struct SnoopState {
+  bool enabled = false;
+  bool querier = false;
+};
+auto GetSnooping(const std::string &bridge) -> SnoopState;
+auto SetSnooping(const std::string &bridge, bool enabled) -> bool;
+auto SetQuerier(const std::string &bridge, bool enabled) -> bool;
+
+/// One multicast group the bridge is forwarding.
+struct MdbEntry {
+  std::string port;
+  std::string group;
+  std::uint16_t vid = 0;
+};
+auto GetMdb() -> std::vector<MdbEntry>;
 
 }  // namespace einheit::s5::dsa
 

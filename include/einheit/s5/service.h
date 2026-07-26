@@ -13,10 +13,24 @@
 #define EINHEIT_S5_SERVICE_H_
 
 #include <optional>
+#include <string>
 
 #include "einheit/cli/protocol/envelope.h"
 
 namespace einheit::s5::service {
+
+/// Point the service at the durable state directory. `show system`
+/// reads the framework's boot report from there for its
+/// config-divergence row, which is the one piece of framework state a
+/// product read needs. Same seam shape as util::SetFsRoot; tests point
+/// it at a scratch tree.
+/// @param dir State directory, or empty to disable the lookup.
+auto SetStateDir(std::string dir) -> void;
+
+/// Drop the process-wide caches (discovered port list, `clear
+/// counters` baselines). Tests swap the fake box between cases and
+/// would otherwise inherit the previous case's box.
+auto ResetCachesForTesting() -> void;
 
 /// Execute one product wire command against the hardware/system.
 /// @param req Decoded wire request.
