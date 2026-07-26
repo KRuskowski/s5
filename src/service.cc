@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "einheit/s5/dsa.h"
+#include "einheit/s5/fabric.h"
 #include "einheit/s5/poe.h"
 #include "einheit/s5/sys.h"
 #include "einheit/s5/util.h"
@@ -148,6 +149,34 @@ auto ShowVlans(const Request &req) -> Response {
     body += Row({std::to_string(v.vid), v.port,
                  v.untagged ? "yes" : "-", v.pvid ? "yes" : "-"});
   }
+  return Ok(req, body);
+}
+
+auto Join(const std::vector<std::string> &items) -> std::string {
+  if (items.empty()) return "-";
+  std::string out;
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) out += ' ';
+    out += items[i];
+  }
+  return out;
+}
+
+/// The fabric the backend builds, as the box actually holds it. This is
+/// how "my VLANs do nothing" gets diagnosed: vlan_filtering off, or a
+/// port that never made it into the bridge.
+auto ShowFabric(const Request &req) -> Response {
+  const auto st = fabric::GetStatus(fabric::S5Topology());
+  std::string body;
+  body += Row({"bridge", st.bridge});
+  body += Row({"exists", st.exists ? "yes" : "no"});
+  body += Row({"vlan filtering", st.vlan_filtering ? "yes" : "no"});
+  body += Row({"state", st.up ? "up" : "down"});
+  body += Row({"conduit", st.conduit.empty() ? "-" : st.conduit});
+  body += Row({"enslaved", Join(st.enslaved)});
+  body += Row({"detached", Join(st.detached)});
+  body += Row({"absent", Join(st.absent)});
+  body += Row({"routed", Join(st.routed)});
   return Ok(req, body);
 }
 
@@ -323,6 +352,7 @@ auto HandleProduct(const Request &req) -> std::optional<Response> {
   if (c == "show_counters") return ShowCounters(req);
   if (c == "show_mac_table") return ShowMacTable(req);
   if (c == "show_vlans") return ShowVlans(req);
+  if (c == "show_fabric") return ShowFabric(req);
   if (c == "show_version") return ShowVersion(req);
   if (c == "show_system") return ShowSystem(req);
   if (c == "show_ip") return ShowIp(req);

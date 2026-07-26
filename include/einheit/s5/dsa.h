@@ -51,6 +51,16 @@ struct MacEntry {
 /// "lan1", "lan2", ..., "wan".
 auto DiscoverPorts() -> std::vector<std::string>;
 
+/// True when `iface` is administratively up — IFF_UP in the sysfs
+/// `flags` attribute. Must be a bit test, not a comparison against a
+/// known flags word: the other bits move with the interface's role
+/// (an enslaved switch port reads 0x1303/0x1302, a routed one
+/// 0x1003/0x1002), so anything that matches whole values reports a
+/// bridged-and-down port as up.
+/// @param iface Netdev name.
+/// @returns Whether IFF_UP is set.
+auto IsUp(const std::string &iface) -> bool;
+
 /// Read port status (link, speed, duplex) from sysfs.
 auto GetPortStatus(const std::string &port) -> PortStatus;
 

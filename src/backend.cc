@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "einheit/s5/dsa.h"
+#include "einheit/s5/fabric.h"
 #include "einheit/s5/poe.h"
 #include "einheit/s5/sys.h"
 
@@ -387,6 +388,18 @@ auto S5Backend::Apply(const Candidate &candidate)
         what});
   };
 
+  // The fabric first: enslaving a port and turning vlan_filtering on
+  // are preconditions for every port and VLAN write below, and the
+  // failure modes without them are ugly (`bridge vlan add` on an
+  // unbridged port errors out; on a bridge without vlan_filtering it
+  // succeeds and does nothing). Deliberately does NOT set `applied`:
+  // the fabric is infrastructure the box needs whichever candidate is
+  // being applied, so bringing it up cannot leave a candidate
+  // half-applied.
+  if (auto f = fabric::Ensure(fabric::S5Topology()); !f) {
+    return fail(std::format("fabric bootstrap: {}", f.error().message));
+  }
+
   if (plan->hostname) {
     if (!sys::SetHostname(*plan->hostname)) {
       return fail("hostname write failed");
@@ -525,6 +538,12 @@ auto S5Backend::ReadRunning() -> Config {
 
 auto S5Backend::Schema() const -> const cli::schema::Schema & {
   return schema_.Get();
+}
+
+auto S5Backend::EnsureFabric()
+    -> std::expected<void, Error<fabric::FabricError>> {
+  std::lock_guard<std::mutex> lk(mu_);
+  return fabric::Ensure(fabric::S5Topology());
 }
 
 }  // namespace einheit::s5

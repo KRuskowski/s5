@@ -1,0 +1,44 @@
+[Unit]
+# Boot-restore: build the switch fabric, then re-apply the committed
+# configuration. Without this the box wakes up as a factory-default
+# switch with its operator's intent stranded in the commit history.
+Description=einheit s5 boot-restore (switch fabric + committed config)
+After=local-fs.target
+# Before a login is possible: an operator must never reach a prompt on a
+# box that has not yet applied its own configuration.
+#
+# sshd and getty are named EXPLICITLY. `Before=multi-user.target` orders
+# this unit against the target only, not against the other units pulled
+# into it, so without these systemd is free to start sshd concurrently —
+# and an operator who logs in during that window sees a switch with no
+# bridge and no VLANs. (Debian calls it ssh.service; sshd.service is the
+# alias elsewhere. Naming a unit that does not exist is harmless.)
+Before=ssh.service sshd.service getty.target
+Before=serial-getty@ttyS0.service multi-user.target
+#
+# Deliberately NOT ordered before network-pre.target, however tempting
+# "before anything touches the interfaces" sounds. network-pre is a
+# sysinit-phase target, and this unit is WantedBy=multi-user.target,
+# which systemd reaches only AFTER sysinit — so the two together are a
+# genuine ordering cycle. systemd breaks a cycle by deleting a job, and
+# on the test VM (whose cloud-init units are already in that cycle) it
+# picked THIS unit twice in 50 power cuts: the box booted with no
+# fabric and no restored config, silently, on 4% of boots.
+# `journalctl | grep "deleted to break ordering cycle"` is how that
+# shows up. Nothing else on an s5 configures br0 — the CLI owns its own
+# addressing — so there is nothing to race here anyway.
+
+[Service]
+Type=oneshot
+# Keep the unit "active" after exit so `systemctl status` shows the
+# boot-restore outcome for the whole uptime, not just for a moment.
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/einheit_s5 --apply-boot
+# A hardware apply that hangs must not hang the boot forever.
+TimeoutStartSec=120
+# No retry loop: a restore that fails needs an operator, and retrying
+# a half-applied hardware write is how a bad boot becomes a bad box.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

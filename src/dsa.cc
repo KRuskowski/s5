@@ -42,14 +42,38 @@ auto DiscoverPorts() -> std::vector<std::string> {
   return ports;
 }
 
+auto IsUp(const std::string &iface) -> bool {
+  const auto flags = ReadSysfs("/sys/class/net/" + iface + "/flags");
+  if (flags.size() < 3 || flags[0] != '0' ||
+      (flags[1] != 'x' && flags[1] != 'X')) {
+    return false;
+  }
+  unsigned long value = 0;
+  for (std::size_t i = 2; i < flags.size(); ++i) {
+    const char c = flags[i];
+    unsigned digit = 0;
+    if (c >= '0' && c <= '9') {
+      digit = static_cast<unsigned>(c - '0');
+    } else if (c >= 'a' && c <= 'f') {
+      digit = static_cast<unsigned>(c - 'a') + 10;
+    } else if (c >= 'A' && c <= 'F') {
+      digit = static_cast<unsigned>(c - 'A') + 10;
+    } else {
+      return false;
+    }
+    value = value * 16 + digit;
+  }
+  // IFF_UP
+  return (value & 0x1U) != 0;
+}
+
 auto GetPortStatus(const std::string &port) -> PortStatus {
   PortStatus st;
   st.name = port;
   auto base = "/sys/class/net/" + port + "/";
   auto operstate = ReadSysfs(base + "operstate");
   st.link = (operstate == "up");
-  auto flags = ReadSysfs(base + "flags");
-  st.enabled = !flags.empty() && flags != "0x1002";
+  st.enabled = IsUp(port);
   st.speed = ReadSysfs(base + "speed");
   if (st.speed == "-1" || st.speed.empty())
     st.speed = "-";

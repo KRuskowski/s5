@@ -17,6 +17,7 @@
 #include "einheit/cli/confd/config_backend.h"
 #include "einheit/cli/error.h"
 #include "einheit/cli/schema.h"
+#include "einheit/s5/fabric.h"
 
 namespace einheit::s5 {
 
@@ -43,6 +44,16 @@ class S5Backend : public einheit::cli::confd::ConfigBackend {
   auto ReadRunning() -> einheit::cli::confd::Config override;
   auto Schema() const
       -> const einheit::cli::schema::Schema & override;
+
+  /// Bring the switch fabric up (bridge + vlan_filtering + enslaved
+  /// ports + conduit), idempotently. Apply calls this before touching
+  /// any port or VLAN, because a `bridge vlan` entry on an unbridged
+  /// port fails and a VLAN entry on a bridge without vlan_filtering is
+  /// silently inert. Exposed separately so the boot path can construct
+  /// the fabric on a box with no commit history to restore.
+  /// @returns void, or the first fabric command that failed.
+  auto EnsureFabric()
+      -> std::expected<void, einheit::cli::Error<fabric::FabricError>>;
 
  private:
   einheit::cli::schema::SchemaHandle schema_;

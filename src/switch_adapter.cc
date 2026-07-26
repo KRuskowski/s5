@@ -122,6 +122,24 @@ class SwitchAdapter : public ProductAdapter {
             .wire_command = "show_vlans",
             .help = "Show VLAN configuration",
         },
+        // Served by the confd runtime, not by service::HandleProduct:
+        // commits, the open session, the edit-lock holder and any
+        // pending commit-confirmed countdown. The framework's config
+        // globals deliberately leave this verb to the adapter, so
+        // without it that state has no CLI surface at all.
+        CommandSpec{
+            .path = "show status",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_status",
+            .help = "Show config-plane status: commits, session, edit "
+                    "lock, pending commit-confirmed",
+        },
+        CommandSpec{
+            .path = "show fabric",
+            .role = cli::RoleGate::AnyAuthenticated,
+            .wire_command = "show_fabric",
+            .help = "Show the switch fabric (bridge, members, conduit)",
+        },
         CommandSpec{
             .path = "show version",
             .role = cli::RoleGate::AnyAuthenticated,
@@ -317,7 +335,8 @@ class SwitchAdapter : public ProductAdapter {
         });
       }
       RenderFormatted(t, renderer);
-    } else if (wire == "show_system" || wire == "show_ntp") {
+    } else if (wire == "show_system" || wire == "show_ntp" ||
+               wire == "show_fabric") {
       Table t;
       AddColumn(t, "field", Align::Left, Priority::High);
       AddColumn(t, "value", Align::Left, Priority::High);
@@ -326,6 +345,22 @@ class SwitchAdapter : public ProductAdapter {
         if (wire == "show_ntp" && Field(row, 0) == "synced") {
           sem = Field(row, 1) == "yes" ? Semantic::Good
                                        : Semantic::Warn;
+        }
+        // A fabric that is missing, filtering-off or has a detached
+        // member is the reason VLAN config appears to do nothing, so
+        // colour those rows rather than leaving them to be read.
+        if (wire == "show_fabric") {
+          const auto &field = Field(row, 0);
+          const auto &value = Field(row, 1);
+          if (field == "exists" || field == "vlan filtering") {
+            sem = value == "yes" ? Semantic::Good : Semantic::Bad;
+          } else if (field == "state") {
+            sem = value == "up" ? Semantic::Good : Semantic::Bad;
+          } else if (field == "detached" || field == "absent") {
+            sem = value == "-" ? Semantic::Dim : Semantic::Warn;
+          } else if (field == "conduit") {
+            sem = value == "-" ? Semantic::Warn : Semantic::Default;
+          }
         }
         AddRow(t, {Cell{Field(row, 0), Semantic::Emphasis},
                    Cell{Field(row, 1), sem}});
