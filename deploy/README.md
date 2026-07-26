@@ -19,6 +19,55 @@ created on first run. It must be on a writable, persistent filesystem —
 on the production SPI-NAND image that means a writable overlay, not
 squashfs.
 
+`/var/run/einheit` holds **generated apply artifacts** — the dnsmasq
+configuration, the LLDP daemon's configuration, the mDNS repeater's
+argument list, the DHCP lease database, and one marker file per service
+recording whether the configuration wants it. All of it is rebuilt from
+the committed configuration on every commit and every boot, so a tmpfs
+is correct and a wipe is harmless. Nothing here is operator-editable and
+nothing here needs to survive a reboot.
+
+## Packages the image must carry
+
+Phase 2 turns several features into "a daemon plus a generated config".
+The backend **fails the commit** when the binary is absent rather than
+reporting success and doing nothing, so a missing package is a feature
+the operator cannot turn on — loudly, which is the intent. What the
+image needs:
+
+| Package | Needed by | Absent means |
+|---|---|---|
+| `mstpd` (+ `mstpctl`, `/sbin/bridge-stp`) | RSTP (WP1.2) | **the box cannot complete its first boot** — `stp.mode rstp` is in the shipped factory configuration |
+| `dnsmasq` | DHCP server + DNS forwarder (WP2.3) | `vlans.<vid>.dhcp.*` and `dns.serve` are refused at commit |
+| `mdns-repeater` | mDNS reflection (WP2.4) | `mdns.enabled` is refused at commit |
+| busybox `ntpd` applet (with `-l`) | time client and server (WP2.5) | `ntp.server` is refused at commit |
+| `iproute2` (`ip`, `bridge`) | fabric, VLANs, SVIs, routes | nothing works |
+| `ethtool` | port speed/duplex/flow control | those paths fail; the rest is fine |
+
+Buildroot has packages for all of these (`BR2_PACKAGE_MSTPD`,
+`BR2_PACKAGE_DNSMASQ`, `BR2_PACKAGE_MDNS_REPEATER`,
+`BR2_BUSYBOX_...NTPD`). mstpd is **not** in Debian trixie, so the test
+VM builds it from `github.com/mstpd/mstpd` — see the note in
+`test/vm_prep.sh`'s companion documentation below.
+
+The LLDP daemon is not a package: it is `einheit_s5 --lldp-daemon`, the
+same binary in another mode (see `include/einheit/s5/lldp.h` for why we
+own the implementation rather than packaging lldpd). It is started by a
+commit and should also be started at boot, after `--apply-boot` has
+generated its configuration.
+
+### mstpd and the kernel's user-space STP handshake
+
+`stp.mode rstp` sets `/sys/class/net/br0/bridge/stp_state`, which makes
+the kernel run `/sbin/bridge-stp br0 start`. That helper — shipped with
+mstpd — starts the daemon and registers the bridge, and only if it
+succeeds does the kernel settle on `BR_USER_STP` (stp_state **2**). If
+the helper is missing or fails, the kernel silently falls back to its
+own 802.1D (stp_state 1), which is not what the operator asked for, so
+the backend verifies the resulting state and fails the commit otherwise.
+`/etc/bridge-stp.conf` needs no entry: with `MSTP_BRIDGES` empty, mstpd
+manages every bridge, which is what we want on a box with one.
+
 ## Boot-restore
 
 Nothing else re-applies committed configuration when the box comes back.

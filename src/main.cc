@@ -37,6 +37,7 @@
 
 #include "einheit/s5/backend.h"
 #include "einheit/s5/fabric.h"
+#include "einheit/s5/lldp.h"
 #include "einheit/s5/poe.h"
 #include "einheit/s5/service.h"
 #include "einheit/s5/switch_adapter.h"
@@ -242,6 +243,11 @@ auto RunCli() -> int {
                              f.error().message);
   }
   confd::Runtime runtime(backend, MakeRuntimeOptions(state_dir));
+  // A VLAN's name exists only in the configuration — there is nothing
+  // on the box to read it back from — so `show vlans` needs a window
+  // onto running config to print one.
+  einheit::s5::service::SetRunningConfigReader(
+      [&runtime]() { return runtime.Running(); });
 
   CommandTree tree;
   // Core verbs are non-optional; the config verbs are justified
@@ -317,14 +323,18 @@ int main(int argc, char *argv[]) {
 
   bool apply_boot = false;
   bool dump_docs = false;
+  bool lldp_daemon = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--apply-boot") {
       apply_boot = true;
     } else if (arg == "--dump-docs") {
       dump_docs = true;
+    } else if (arg == "--lldp-daemon") {
+      lldp_daemon = true;
     } else if (arg == "--help" || arg == "-h") {
-      std::cout << "usage: einheit_s5 [--apply-boot|--dump-docs]\n"
+      std::cout << "usage: einheit_s5 [--apply-boot|--dump-docs|"
+                   "--lldp-daemon]\n"
                    "  (no arguments)  interactive CLI\n"
                    "  --apply-boot    build the fabric and re-apply the "
                    "committed\n"
@@ -332,7 +342,11 @@ int main(int argc, char *argv[]) {
                    "from init)\n"
                    "  --dump-docs     print the generated operator "
                    "reference\n"
-                   "                  (markdown) and exit\n";
+                   "                  (markdown) and exit\n"
+                   "  --lldp-daemon   run the LLDP transmit/receive "
+                   "loop until\n"
+                   "                  killed (started by a commit, "
+                   "and by init)\n";
       return 0;
     } else {
       std::cerr << std::format(
@@ -349,6 +363,21 @@ int main(int argc, char *argv[]) {
       return RunDumpDocs();
     } catch (const std::exception &e) {
       std::cerr << std::format("einheit-s5: fatal: {}\n", e.what());
+      return 1;
+    }
+  }
+
+  if (lldp_daemon) {
+    // No shell, no supervisor, no config runtime: a long-lived loop on
+    // raw sockets that reads its configuration from the file a commit
+    // generates. Reconfigured by SIGHUP, stopped by SIGTERM.
+    try {
+      return einheit::s5::lldp::RunDaemon();
+    } catch (const std::exception &e) {
+      std::cerr << std::format("einheit-s5: lldp: fatal: {}\n", e.what());
+      return 1;
+    } catch (...) {
+      std::cerr << "einheit-s5: lldp: fatal: unknown error\n";
       return 1;
     }
   }

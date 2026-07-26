@@ -1,0 +1,10 @@
+# Reflection between one VLAN is not reflection. Accepting it would
+# start a repeater that repeats nothing while `show system services`
+# cheerfully reports it running.
+[config]
+vlans.10.name office
+vlans.10.address 10.10.0.1/24
+mdns.enabled true
+mdns.reflect.10 true
+[expect-commit-fail]
+at least two

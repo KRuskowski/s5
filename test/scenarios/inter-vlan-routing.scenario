@@ -1,0 +1,29 @@
+# Two routed VLANs and a static route: the switch stops being purely
+# L2. Each VLAN gets a name, an SVI address, and access ports; the
+# switch forwards between them and knows one route beyond itself.
+[config]
+vlans.10.name office
+vlans.10.address 10.10.0.1/24
+vlans.20.name lab
+vlans.20.address 10.20.0.1/24
+ports.lan1.vlan.10 untagged-pvid
+ports.lan2.vlan.20 untagged-pvid
+routing.enabled true
+routing.static.branch.prefix 192.168.44.0/24
+routing.static.branch.via 10.20.0.9
+[delete]
+ports.lan1.vlan.1
+ports.lan2.vlan.1
+[expect-box]
+ip -o -4 addr show dev br0.10 :: 10\.10\.0\.1/24
+ip -o -4 addr show dev br0.20 :: 10\.20\.0\.1/24
+sudo /usr/sbin/bridge vlan show dev br0 self :: 10
+cat /proc/sys/net/ipv4/ip_forward :: ^1$
+ip -4 route show :: 192\.168\.44\.0/24 via 10\.20\.0\.9
+[expect-cli]
+show vlans :: office
+show vlans :: 10\.10\.0\.1/24
+show vlans :: lab
+show route :: 192\.168\.44\.0/24
+show route :: config
+show ip :: br0\.10

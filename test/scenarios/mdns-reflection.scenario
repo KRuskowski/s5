@@ -1,0 +1,17 @@
+# Discovery across VLANs: printers on one, laptops on another, and
+# mDNS repeated between them. Reflection needs at least two VLANs with
+# interfaces to reflect on, which is why the SVIs come with it.
+[config]
+vlans.10.name office
+vlans.10.address 10.10.0.1/24
+vlans.20.name printers
+vlans.20.address 10.20.0.1/24
+mdns.enabled true
+mdns.reflect.10 true
+mdns.reflect.20 true
+[expect-box]
+pgrep -a mdns-repeater :: br0\.10
+pgrep -a mdns-repeater :: br0\.20
+[expect-cli]
+show system services :: mdns-repeater
+show system services :: running

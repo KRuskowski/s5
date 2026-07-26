@@ -1,0 +1,29 @@
+# Loop protection as a shipped switch should hold it: rapid spanning
+# tree on, this box deliberately made the root, and the ports facing
+# desks marked as edges so a phone does not wait out a forward delay.
+# bpdu-guard on those same edge ports is the other half: an edge port
+# that hears a BPDU has somebody else's switch on it.
+[config]
+stp.mode rstp
+stp.priority 4096
+stp.hello 2
+stp.max_age 20
+stp.forward_delay 15
+ports.lan1.stp.edge true
+ports.lan1.stp.bpdu_guard true
+ports.lan2.stp.edge true
+ports.lan2.stp.bpdu_guard true
+ports.lan4.stp.cost 20000
+[expect-box]
+cat /sys/class/net/br0/bridge/stp_state :: ^2$
+sudo /usr/sbin/mstpctl showbridge br0 :: force protocol version\s+rstp
+sudo /usr/sbin/mstpctl showbridge br0 :: bridge id\s+1\.000
+sudo /usr/sbin/mstpctl showportdetail br0 lan1 :: admin edge port\s+yes
+sudo /usr/sbin/mstpctl showportdetail br0 lan1 :: bpdu guard port\s+yes
+sudo /usr/sbin/mstpctl showportdetail br0 lan4 :: admin external cost\s+20000
+[expect-cli]
+show spanning-tree :: protocol
+show spanning-tree :: rstp
+show spanning-tree :: this bridge
+show spanning-tree statistics :: lan1
+show system services :: mstpd

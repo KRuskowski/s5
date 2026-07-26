@@ -4,19 +4,31 @@
 
 #include "einheit/s5/service.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cstdlib>
+#include <cstring>
 #include <format>
+#include <fstream>
+#include <functional>
 #include <map>
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "einheit/cli/confd/boot_report.h"
+#include "einheit/s5/dnsmasq.h"
 #include "einheit/s5/dsa.h"
 #include "einheit/s5/fabric.h"
+#include "einheit/s5/l3.h"
+#include "einheit/s5/lldp.h"
 #include "einheit/s5/poe.h"
+#include "einheit/s5/stp.h"
+#include "einheit/s5/svc.h"
 #include "einheit/s5/sys.h"
 #include "einheit/s5/util.h"
 
@@ -238,6 +250,177 @@ auto ShowIgmpSnooping(const Request &req) -> Response {
   return Ok(req, body);
 }
 
+/// BPDU-counter baselines for `clear spanning-tree statistics`. mstpd
+/// has no counter-reset in its control protocol, so "clear" is the same
+/// snapshot-subtract `clear counters` uses, and for the same reason: a
+/// restart of mstpd genuinely does zero them, so a baseline that
+/// outlived the process would under-report afterwards.
+std::map<std::string, stp::PortState> g_stp_base;  // NOLINT
+
+auto SubtractStpBase(const stp::PortState &p) -> stp::PortState {
+  const auto it = g_stp_base.find(p.port);
+  if (it == g_stp_base.end()) return p;
+  const auto &b = it->second;
+  const auto sub = [](std::uint64_t now, std::uint64_t base) {
+    return now >= base ? now - base : 0;
+  };
+  stp::PortState out = p;
+  out.tx_bpdu = sub(p.tx_bpdu, b.tx_bpdu);
+  out.rx_bpdu = sub(p.rx_bpdu, b.rx_bpdu);
+  out.tx_tcn = sub(p.tx_tcn, b.tx_tcn);
+  out.rx_tcn = sub(p.rx_tcn, b.rx_tcn);
+  out.transitions_fwd = sub(p.transitions_fwd, b.transitions_fwd);
+  out.transitions_blk = sub(p.transitions_blk, b.transitions_blk);
+  return out;
+}
+
+/// `show spanning-tree` — the bridge's place in the tree, then every
+/// port's role and state. Two row shapes in one blob, tagged in the
+/// first field, because "who is root" and "what is each port doing" are
+/// one question an operator asks after patching a cable.
+auto ShowSpanningTree(const Request &req) -> Response {
+  const auto bridge = fabric::S5Topology().bridge;
+  const auto st = stp::GetBridgeState(bridge);
+  std::string body;
+  if (!st.enabled) {
+    body += Row({"bridge", "state", "disabled"});
+    body += Row({"bridge", "note",
+                 stp::Available()
+                     ? "set stp.mode rstp to protect against loops"
+                     : "mstpd is not installed on this box"});
+    return Ok(req, body);
+  }
+  const bool we_are_root = st.bridge_id == st.root_id;
+  body += Row({"bridge", "protocol", st.mode});
+  body += Row({"bridge", "bridge id", st.bridge_id});
+  body += Row({"bridge", "root id",
+               we_are_root ? std::format("{} (this bridge)", st.root_id)
+                           : st.root_id});
+  body += Row({"bridge", "root port",
+               st.root_port.empty() ? "-" : st.root_port});
+  body += Row({"bridge", "hello / max age / fwd delay",
+               std::format("{} / {} / {}", st.hello, st.max_age,
+                           st.forward_delay)});
+  body += Row({"bridge", "topology changes",
+               std::format("{} (last {}s ago)", st.topology_changes,
+                           st.time_since_change)});
+  for (const auto &p : stp::GetPortStates(bridge)) {
+    body += Row({"port", p.port, p.role, p.state, p.cost,
+                 p.oper_edge ? "yes" : "-",
+                 p.bpdu_guard_error ? "BLOCKED"
+                                    : (p.bpdu_guard ? "on" : "-")});
+  }
+  return Ok(req, body);
+}
+
+/// `show spanning-tree statistics [port]` — BPDU counters per port,
+/// baselined by `clear spanning-tree statistics`.
+auto ShowSpanningTreeStatistics(const Request &req) -> Response {
+  const auto filter = Arg(req, 0);
+  std::string body;
+  for (const auto &raw : stp::GetPortStates(fabric::S5Topology().bridge)) {
+    if (!filter.empty() && raw.port != filter) continue;
+    const auto p = SubtractStpBase(raw);
+    body += Row({p.port, std::to_string(p.tx_bpdu),
+                 std::to_string(p.rx_bpdu), std::to_string(p.tx_tcn),
+                 std::to_string(p.rx_tcn),
+                 std::to_string(p.transitions_fwd),
+                 std::to_string(p.transitions_blk)});
+  }
+  return Ok(req, body);
+}
+
+auto ClearSpanningTreeStatistics(const Request &req) -> Response {
+  const auto filter = Arg(req, 0);
+  if (!filter.empty() && !SafeToken(filter)) {
+    return Err(req, "bad-arg", std::format("invalid port '{}'", filter));
+  }
+  std::size_t cleared = 0;
+  for (const auto &p : stp::GetPortStates(fabric::S5Topology().bridge)) {
+    if (!filter.empty() && p.port != filter) continue;
+    g_stp_base[p.port] = p;
+    ++cleared;
+  }
+  if (cleared == 0) {
+    return Err(req, "bad-arg",
+               filter.empty()
+                   ? "spanning tree is not running"
+                   : std::format("no spanning-tree port '{}'", filter),
+               "check `show spanning-tree`");
+  }
+  return Ok(req, std::format(
+                     "spanning-tree statistics cleared on {} port(s)\n",
+                     cleared));
+}
+
+/// `clear spanning-tree bpdu-guard <port>` — the recovery verb for a
+/// port the guard is holding down. Without it a BPDU-guard event needs
+/// a reboot or a shell, and the whole point of the guard is that the
+/// operator stays in control from the CLI.
+auto ClearBpduGuard(const Request &req) -> Response {
+  const auto port = Arg(req, 0);
+  if (!SafeToken(port)) {
+    return Err(req, "bad-arg", "invalid port", "usage: clear "
+                                               "spanning-tree bpdu-guard "
+                                               "<port>");
+  }
+  const auto bridge = fabric::S5Topology().bridge;
+  const auto ports = stp::GetPortStates(bridge);
+  const auto it = std::find_if(ports.begin(), ports.end(),
+                               [&port](const auto &p) {
+                                 return p.port == port;
+                               });
+  if (it == ports.end()) {
+    return Err(req, "bad-arg",
+               std::format("no spanning-tree port '{}'", port),
+               "check `show spanning-tree`");
+  }
+  if (!it->bpdu_guard_error) {
+    return Ok(req, std::format("{} is not blocked by bpdu-guard\n", port));
+  }
+  if (!stp::ClearBpduGuard(bridge, port)) {
+    return Err(req, "hw-error",
+               std::format("bouncing {} failed", port));
+  }
+  return Ok(req, std::format("{} bounced; bpdu-guard cleared\n", port));
+}
+
+/// `show neighbors [port]` — who is on the other end of each cable,
+/// as LLDP heard it. Every string here came off the network and was
+/// sanitised on the way in (see lldp::SanitizeWireString).
+auto ShowNeighbors(const Request &req) -> Response {
+  const auto filter = Arg(req, 0);
+  const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+  std::string body;
+  for (const auto &n : lldp::ReadNeighbors(now)) {
+    if (!filter.empty() && n.local_port != filter) continue;
+    body += Row({n.local_port, n.chassis_id,
+                 n.system_name.empty() ? "-" : n.system_name, n.port_id,
+                 n.management_address.empty() ? "-" : n.management_address,
+                 n.capabilities.empty() ? "-" : n.capabilities,
+                 std::format("{}s", now - n.last_seen)});
+  }
+  return Ok(req, body);
+}
+
+/// `show system services` — what the switch runs behind the schema,
+/// and whether it is actually up. This is where "DHCP is configured
+/// but dnsmasq died" becomes visible instead of becoming a support
+/// call about clients not getting addresses.
+auto ShowSystemServices(const Request &req) -> Response {
+  std::string body;
+  for (const auto &s : svc::GetAll()) {
+    const char *state = !s.wanted ? (s.running ? "running (not configured)"
+                                               : "not configured")
+                        : s.running ? "running"
+                                    : "DOWN";
+    body += Row({s.name, state, s.detail});
+  }
+  return Ok(req, body);
+}
+
 /// `show interfaces detail [port]` — what a port was CONFIGURED to do
 /// alongside what it actually negotiated. Both, because "I set 1000
 /// and the link came up at 100" is the question this answers.
@@ -272,11 +455,161 @@ auto ShowInterfacesDetail(const Request &req) -> Response {
   return Ok(req, body);
 }
 
+/// The running configuration, for the handful of things that have no
+/// counterpart on the box. Empty when nothing supplied a reader.
+std::function<cli::confd::Config()> g_config_reader;  // NOLINT
+
+auto RunningConfig() -> cli::confd::Config {
+  return g_config_reader ? g_config_reader() : cli::confd::Config{};
+}
+
+/// `show vlans` — one row per VLAN rather than one per (VLAN, port).
+/// A VLAN is the thing an operator reasons about: what it is called,
+/// whether the switch routes for it, and which ports are in it. The
+/// per-port breakdown lives in the members column, where it reads as
+/// the answer to "who is in VLAN 20" instead of as four rows that have
+/// to be assembled by eye.
 auto ShowVlans(const Request &req) -> Response {
-  std::string body;
+  const auto config = RunningConfig();
+  const auto topo = fabric::S5Topology();
+  const auto ports = Ports();
+  std::map<int, std::vector<std::string>> members;
   for (const auto &v : dsa::GetVlans()) {
-    body += Row({std::to_string(v.vid), v.port,
-                 v.untagged ? "yes" : "-", v.pvid ? "yes" : "-"});
+    // `bridge vlan show` also lists the bridge device itself; the
+    // bridge's own membership is the SVI, reported in the L3 column.
+    if (std::find(ports.begin(), ports.end(), v.port) == ports.end()) {
+      continue;
+    }
+    const char *mode = (v.untagged && v.pvid) ? "u,pvid"
+                       : v.untagged           ? "u"
+                       : v.pvid               ? "pvid"
+                                              : "t";
+    members[v.vid].push_back(std::format("{}({})", v.port, mode));
+  }
+  std::map<int, std::string> addresses;
+  for (const auto &svi : l3::GetSvis(topo.bridge)) {
+    if (!svi.address.empty()) addresses[svi.vid] = svi.address;
+  }
+  std::map<int, std::string> names;
+  for (const auto &[path, value] : config) {
+    if (!path.starts_with("vlans.") || !path.ends_with(".name")) continue;
+    const auto vid = std::atoi(path.substr(6).c_str());
+    if (vid > 0) names[vid] = value;
+  }
+  // Union of everything: a VLAN can exist as ports alone, as a name
+  // alone, or as an address alone, and all three are worth showing.
+  std::set<int> vids;
+  for (const auto &[vid, unused] : members) vids.insert(vid);
+  for (const auto &[vid, unused] : addresses) vids.insert(vid);
+  for (const auto &[vid, unused] : names) vids.insert(vid);
+  std::string body;
+  for (int vid : vids) {
+    std::string member_list;
+    const auto it = members.find(vid);
+    if (it != members.end()) {
+      for (std::size_t i = 0; i < it->second.size(); ++i) {
+        if (i > 0) member_list += ' ';
+        member_list += it->second[i];
+      }
+    }
+    const auto name = names.contains(vid) ? names.at(vid) : std::string("-");
+    const auto addr =
+        addresses.contains(vid) ? addresses.at(vid) : std::string("-");
+    body += Row({std::to_string(vid), name, addr,
+                 member_list.empty() ? "-" : member_list});
+  }
+  return Ok(req, body);
+}
+
+/// `show dhcp leases` — who currently holds an address. Read from
+/// dnsmasq's lease database, so it reflects the server rather than the
+/// configuration.
+auto ShowDhcpLeases(const Request &req) -> Response {
+  const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+  std::string body;
+  for (const auto &l : dnsmasq::ReadLeases()) {
+    const auto remaining = l.expires - now;
+    body += Row({l.ip, l.mac,
+                 l.hostname.empty() || l.hostname == "*" ? "-" : l.hostname,
+                 remaining > 0 ? std::format("{}m", remaining / 60)
+                               : "expired"});
+  }
+  return Ok(req, body);
+}
+
+/// `show dhcp server` — the pools as the server actually holds them,
+/// read back out of the generated configuration rather than out of
+/// the candidate. A pool that failed to reach the file is exactly the
+/// thing an operator is looking for here.
+auto ShowDhcpServer(const Request &req) -> Response {
+  std::string body;
+  const bool running = svc::Running("dnsmasq");
+  body += Row({"server", running ? "running" : "not running", "", ""});
+  std::ifstream f(util::FsPath(dnsmasq::ConfigPath()));
+  if (!f) {
+    body += Row({"pools", "none configured", "", ""});
+    return Ok(req, body);
+  }
+  const auto leases = dnsmasq::ReadLeases();
+  std::string line;
+  while (std::getline(f, line)) {
+    if (!line.starts_with("dhcp-range=set:")) continue;
+    // dhcp-range=set:vlan10,10.10.0.100,10.10.0.200,255.255.255.0,720m
+    const auto body_text = line.substr(std::strlen("dhcp-range=set:"));
+    std::vector<std::string> f2;
+    std::string field;
+    std::istringstream ls(body_text);
+    while (std::getline(ls, field, ',')) f2.push_back(field);
+    if (f2.size() < 5) continue;
+    // Count leases inside this pool's range, which is the number that
+    // answers "am I about to run out of addresses".
+    std::size_t used = 0;
+    for (const auto &l : leases) {
+      if (l.ip >= f2[1] && l.ip <= f2[2]) ++used;
+    }
+    body += Row({f2[0], std::format("{} - {}", f2[1], f2[2]), f2[4],
+                 std::format("{} lease(s)", used)});
+  }
+  return Ok(req, body);
+}
+
+/// `clear dhcp lease <ip|mac>` — hand an address back to the pool.
+auto ClearDhcpLease(const Request &req) -> Response {
+  const auto who = Arg(req, 0);
+  if (!SafeToken(who)) {
+    return Err(req, "bad-arg", "invalid address or MAC",
+               "usage: clear dhcp lease <ip|mac>");
+  }
+  bool removed = false;
+  if (!dnsmasq::RemoveLease(who, &removed)) {
+    return Err(req, "sys-error", "rewriting the lease database failed");
+  }
+  if (!removed) {
+    return Ok(req, std::format("no lease held by {}\n", who));
+  }
+  // dnsmasq reads its lease database only at startup, so the file edit
+  // alone would leave the daemon still holding the lease in memory.
+  if (svc::Running("dnsmasq") &&
+      !svc::Restart({.name = "dnsmasq", .command = dnsmasq::Command()})) {
+    return Err(req, "sys-error",
+               "the lease was released but dnsmasq did not come back",
+               "check `show system services`");
+  }
+  return Ok(req, std::format("lease held by {} released\n", who));
+}
+
+/// `show route` — the forwarding table with an origin column, so a
+/// route the operator configured is distinguishable from one the
+/// kernel or a DHCP lease put there.
+auto ShowRoute(const Request &req) -> Response {
+  std::string body;
+  body += Row({"forwarding",
+               l3::GetForwarding() ? "enabled" : "disabled", "", ""});
+  for (const auto &r : l3::GetRoutes()) {
+    body += Row({r.prefix, r.via.empty() ? "-" : r.via,
+                 r.device.empty() ? "-" : r.device, r.origin});
   }
   return Ok(req, body);
 }
@@ -306,6 +639,26 @@ auto DivergenceSummary() -> std::string {
   if (r.reconcile_conflicts == 0) return "none";
   return std::format("{} path(s) diverged at boot from commit {}",
                      r.reconcile_conflicts, r.applied_revision);
+}
+
+/// The `alarms` row of `show system`. A BPDU-guard violation takes a
+/// port out of service, which is exactly the class of event an operator
+/// finds by looking at the box's overall health rather than by
+/// happening to run `show spanning-tree`.
+auto AlarmSummary() -> std::string {
+  std::vector<std::string> blocked;
+  for (const auto &p : stp::GetPortStates(fabric::S5Topology().bridge)) {
+    if (p.bpdu_guard_error) blocked.push_back(p.port);
+  }
+  if (blocked.empty()) return "none";
+  std::string ports;
+  for (std::size_t i = 0; i < blocked.size(); ++i) {
+    if (i > 0) ports += ' ';
+    ports += blocked[i];
+  }
+  return std::format("bpdu-guard blocked {} — `clear spanning-tree "
+                     "bpdu-guard <port>` after removing the loop",
+                     ports);
 }
 
 auto Join(const std::vector<std::string> &items) -> std::string {
@@ -359,6 +712,7 @@ auto ShowSystem(const Request &req) -> Response {
                                    disk.size, disk.use_pct)});
   body += Row({"ports", std::to_string(Ports().size())});
   body += Row({"config-divergence", DivergenceSummary()});
+  body += Row({"alarms", AlarmSummary()});
   return Ok(req, body);
 }
 
@@ -383,6 +737,8 @@ auto ShowNtp(const Request &req) -> Response {
   std::string body;
   body += Row({"synced", ntp.synced ? "yes" : "no"});
   body += Row({"server", ntp.server});
+  body += Row({"serving clients",
+               sys::GetNtpServing() ? "yes" : "no"});
   return Ok(req, body);
 }
 
@@ -507,9 +863,16 @@ auto SetStateDir(std::string dir) -> void {
   g_state_dir = std::move(dir);
 }
 
+auto SetRunningConfigReader(std::function<cli::confd::Config()> reader)
+    -> void {
+  g_config_reader = std::move(reader);
+}
+
 auto ResetCachesForTesting() -> void {
   PortsCache().clear();
   g_counter_base.clear();
+  g_stp_base.clear();
+  g_config_reader = {};
 }
 
 auto HandleProduct(const Request &req) -> std::optional<Response> {
@@ -519,6 +882,20 @@ auto HandleProduct(const Request &req) -> std::optional<Response> {
   if (c == "show_mac_table") return ShowMacTable(req);
   if (c == "clear_mac_table") return ClearMacTable(req);
   if (c == "show_igmp_snooping") return ShowIgmpSnooping(req);
+  if (c == "show_spanning_tree") return ShowSpanningTree(req);
+  if (c == "show_spanning_tree_statistics") {
+    return ShowSpanningTreeStatistics(req);
+  }
+  if (c == "clear_spanning_tree_statistics") {
+    return ClearSpanningTreeStatistics(req);
+  }
+  if (c == "clear_bpdu_guard") return ClearBpduGuard(req);
+  if (c == "show_neighbors") return ShowNeighbors(req);
+  if (c == "show_route") return ShowRoute(req);
+  if (c == "show_dhcp_leases") return ShowDhcpLeases(req);
+  if (c == "show_dhcp_server") return ShowDhcpServer(req);
+  if (c == "clear_dhcp_lease") return ClearDhcpLease(req);
+  if (c == "show_system_services") return ShowSystemServices(req);
   if (c == "show_interfaces_detail") return ShowInterfacesDetail(req);
   if (c == "clear_counters") return ClearCounters(req);
   if (c == "show_vlans") return ShowVlans(req);

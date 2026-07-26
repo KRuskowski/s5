@@ -91,11 +91,15 @@ wait_for_boot_unit() {
 
 # A configuration distinctive enough that a factory-default box cannot
 # pass by accident, and covering every config FAMILY: identity, port
-# admin state, VLAN membership, link parameters, the MAC table and
-# multicast snooping. A new family that does not survive a power cut is
-# no more shipped than one that was never written.
+# admin state, VLAN membership, link parameters, the MAC table,
+# multicast snooping, spanning tree, an SVI address, a static route and
+# a DHCP pool. A new family that does not survive a power cut is no more
+# shipped than one that was never written — and the Phase 2 families are
+# the interesting ones here, because each of them is a daemon that has
+# to be brought back up from a generated file that no longer exists
+# after the cut (/var/run is a tmpfs).
 echo "== commit the configuration under test"
-printf '%b' 'configure\nset hostname power-soak\nset ports.lan3.enabled false\nset ports.lan1.vlan.77 untagged-pvid\nset ports.lan1.mtu 9000\nset mac.aging_time 600\nset mac.static.aa:bb:cc:dd:ee:01.port lan1\nset mac.static.aa:bb:cc:dd:ee:01.vlan 1\nset igmp_snooping.enabled true\ncommit\nexit\nexit\n' |
+printf '%b' 'configure\nset hostname power-soak\nset ports.lan3.enabled false\nset ports.lan1.vlan.77 untagged-pvid\nset ports.lan1.mtu 9000\nset mac.aging_time 600\nset mac.static.aa:bb:cc:dd:ee:01.port lan1\nset mac.static.aa:bb:cc:dd:ee:01.vlan 1\nset igmp_snooping.enabled true\nset stp.mode rstp\nset stp.priority 4096\nset ports.lan1.stp.edge true\nset vlans.10.name office\nset vlans.10.address 10.10.0.1/24\nset vlans.10.dhcp.enabled true\nset vlans.10.dhcp.range_start 10.10.0.100\nset vlans.10.dhcp.range_end 10.10.0.120\nset routing.enabled true\nset routing.static.branch.prefix 192.168.44.0/24\nset routing.static.branch.via 10.10.0.9\ncommit\nexit\nexit\n' |
   ssh "$HOST" 'sudo einheit_s5' >/dev/null 2>&1
 assert_in "hostname committed" "power-soak" "$(box hostname)"
 commits_before=$(box 'sudo grep -c "^COMMIT " /var/lib/einheit/s5/confd.state')
@@ -150,6 +154,26 @@ for cycle in $(seq 1 "$CYCLES"); do
     "$(box 'sudo /usr/sbin/bridge fdb show | grep aa:bb:cc:dd:ee:01')"
   assert_in "cycle ${cycle}: IGMP snooping restored" "1" \
     "$(box 'cat /sys/class/net/br0/bridge/multicast_snooping')"
+  # Phase 2. Each of these is a service that had to be restarted from a
+  # configuration file regenerated during this boot: /var/run is a
+  # tmpfs, so "it was there before the cut" proves nothing.
+  assert_in "cycle ${cycle}: spanning tree restored" "2" \
+    "$(box 'cat /sys/class/net/br0/bridge/stp_state')"
+  assert_in "cycle ${cycle}: bridge priority restored" "1.000" \
+    "$(box 'sudo /usr/sbin/mstpctl showbridge br0 | grep "bridge id"')"
+  assert_in "cycle ${cycle}: SVI address restored" "10.10.0.1/24" \
+    "$(box 'ip -o -4 addr show dev br0.10')"
+  assert_in "cycle ${cycle}: bridge VLAN membership restored" "10" \
+    "$(box 'sudo /usr/sbin/bridge vlan show dev br0 self')"
+  assert_in "cycle ${cycle}: forwarding restored" "1" \
+    "$(box 'cat /proc/sys/net/ipv4/ip_forward')"
+  assert_in "cycle ${cycle}: static route restored" "192.168.44.0/24" \
+    "$(box 'ip -4 route show')"
+  assert_in "cycle ${cycle}: DHCP server regenerated and running" \
+    "einheit/dnsmasq.conf" "$(box 'pgrep -a dnsmasq')"
+  assert_in "cycle ${cycle}: the pool came back" \
+    "dhcp-range=set:vlan10,10.10.0.100,10.10.0.120" \
+    "$(box 'sudo cat /var/run/einheit/dnsmasq.conf')"
   assert_in "cycle ${cycle}: boot report says it ran this boot" "yes" \
     "$(printf 'show system boot\nexit\n' | ssh "$HOST" 'sudo einheit_s5' \
        2>/dev/null | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' | grep ran_this_boot)"

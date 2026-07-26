@@ -8,16 +8,25 @@ Set inside a `configure` session: `set <path> <value>`, `delete <path>`, then `c
 
 | Path | Type | Default | Description |
 |---|---|---|---|
+| `dns.local_domain` | string | — | Domain for names the switch serves itself |
 | `dns.primary` | ip | — | Primary DNS nameserver |
 | `dns.secondary` | ip | — | Secondary DNS nameserver |
+| `dns.serve` | boolean | false | Answer DNS queries from clients, forwarding what we do not know |
 | `hostname` | string | — | Switch hostname |
 | `igmp_snooping.enabled` | boolean | true | Prune multicast to ports that asked for it |
 | `igmp_snooping.querier` | boolean | false | Send IGMP queries (needed with no router on the L2) |
 | `interfaces.<name>.address` | cidr | — | Static address + prefix |
 | `interfaces.<name>.dhcp` | boolean | false | Acquire the address via DHCP instead |
+| `interfaces.<name>.gateway` | ip | — | Default gateway reached through this interface |
+| `lldp.enabled` | boolean | true | Announce this switch to its neighbours, and record theirs |
+| `lldp.port.<name>.enabled` | boolean | true | Run LLDP on this port |
+| `lldp.tx_interval` | integer [5..3600] | 30 | Seconds between announcements |
 | `mac.aging_time` | integer [10..1000000] | 300 | Seconds before a learned MAC is forgotten |
 | `mac.static.<name>.port` | string | — | Port the static entry points at |
 | `mac.static.<name>.vlan` | integer [1..4094] | 1 | VLAN the static entry belongs to |
+| `mdns.enabled` | boolean | false | Repeat mDNS between VLANs so discovery crosses them |
+| `mdns.reflect.<name>` | boolean | — | Include this VLAN in mDNS reflection |
+| `ntp.serve` | boolean | false | Also answer time queries from clients on this network |
 | `ntp.server` | string | — | NTP server hostname or IP |
 | `poe.<name>.enabled` | boolean | true | PoE power delivery on this port (1-5) |
 | `poe.<name>.power_limit_mw` | integer [0..30000] | — | Per-port power limit in milliwatts |
@@ -26,7 +35,28 @@ Set inside a `configure` session: `set <path> <value>`, `delete <path>`, then `c
 | `ports.<name>.flow_control` | boolean | false | 802.3x pause frames |
 | `ports.<name>.mtu` | integer [1280..9216] | 1500 | Maximum transmission unit |
 | `ports.<name>.speed` | enum {auto, 10, 100, 1000} | auto | Link speed in Mbit/s, or auto-negotiate |
+| `ports.<name>.stp.bpdu_guard` | boolean | false | Block this port if another switch sends spanning-tree into it |
+| `ports.<name>.stp.cost` | integer [0..200000000] | 0 | Spanning-tree path cost; 0 derives it from link speed |
+| `ports.<name>.stp.edge` | boolean | false | Access port: skip the listening delay and forward at once |
+| `ports.<name>.stp.priority` | enum {0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240} | 128 | Port priority; breaks ties between equal-cost paths to the root |
 | `ports.<name>.vlan.<name>` | enum {tagged, untagged, pvid, untagged-pvid} | — | 802.1Q membership mode for this VID |
+| `routing.enabled` | boolean | false | Forward traffic between VLANs and to the uplink |
+| `routing.static.<name>.prefix` | cidr | — | Destination network; 0.0.0.0/0 is the default route |
+| `routing.static.<name>.via` | ip | — | Next-hop address |
+| `stp.forward_delay` | integer [4..30] | 15 | Seconds a port waits before forwarding (classic mode only) |
+| `stp.hello` | integer [1..10] | 2 | Seconds between spanning-tree messages from the root |
+| `stp.max_age` | integer [6..40] | 20 | Seconds before a silent neighbour is assumed gone |
+| `stp.mode` | enum {rstp, stp, off} | rstp | Loop protection: rapid spanning tree, classic, or none |
+| `stp.priority` | enum {0, 4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768, 36864, 40960, 45056, 49152, 53248, 57344, 61440} | 32768 | Bridge priority; the lowest value on the network becomes the root |
+| `vlans.<name>.address` | cidr | — | Switch address in this VLAN; giving one makes it routable |
+| `vlans.<name>.dhcp.dns` | ip | — | Nameserver told to clients; defaults to the switch itself |
+| `vlans.<name>.dhcp.enabled` | boolean | false | Hand out addresses to clients in this VLAN |
+| `vlans.<name>.dhcp.gateway` | ip | — | Router told to clients; defaults to the switch itself |
+| `vlans.<name>.dhcp.lease_time` | integer [2..10080] | 720 | Minutes a client keeps its address |
+| `vlans.<name>.dhcp.range_end` | ip | — | Last address handed out |
+| `vlans.<name>.dhcp.range_start` | ip | — | First address handed out |
+| `vlans.<name>.dhcp.static.<name>.ip` | ip | — | Address always given to this MAC |
+| `vlans.<name>.name` | string | — | What this VLAN is for, e.g. office or guest |
 
 ## Configuration lifecycle commands
 
@@ -59,6 +89,8 @@ Set inside a `configure` session: `set <path> <value>`, `delete <path>`, then `c
 | Command | Role | Description |
 |---|---|---|
 | `show counters [port]` | any | Show port counters |
+| `show dhcp leases` | any | Show which clients hold which addresses |
+| `show dhcp server` | any | Show the DHCP pools being served, and their usage |
 | `show dns` | any | Show DNS servers |
 | `show env` | any | Show terminal caps, active theme, aliases, target, session |
 | `show fabric` | any | Show the switch fabric (bridge, members, conduit) |
@@ -68,14 +100,19 @@ Set inside a `configure` session: `set <path> <value>`, `delete <path>`, then `c
 | `show ip` | any | Show IP addresses |
 | `show log [lines]` | any | Show syslog |
 | `show mac-table [port]` | any | Show the MAC table (static and learned) |
+| `show neighbors [port]` | any | Show LLDP neighbours heard on each port |
 | `show ntp` | any | Show NTP status |
 | `show poe [port]` | any | Show PoE status |
+| `show route` | any | Show the routing table and whether forwarding is on |
+| `show spanning-tree` | any | Show the spanning tree: root, and each port's role and state |
+| `show spanning-tree statistics [port]` | any | Show per-port BPDU counters and state transitions |
 | `show status` | any | Show config-plane status: commits, session, edit lock, pending commit-confirmed |
 | `show system` | any | Show system info |
 | `show system boot` | any | Show what the last boot-restore did |
+| `show system services` | any | Show the background services the switch runs, and whether they are up |
 | `show users` | any | Show user accounts |
 | `show version` | any | Show switch information |
-| `show vlans` | any | Show VLAN configuration |
+| `show vlans` | any | Show VLANs: name, switch address, and member ports |
 
 ## Operational commands
 
@@ -83,7 +120,10 @@ Set inside a `configure` session: `set <path> <value>`, `delete <path>`, then `c
 |---|---|---|
 | `alias` | any | List aliases; `alias <name> <expansion...>` to define, `alias delete <name>` to remove. Persists to ~/.einheit/aliases.yaml. |
 | `clear counters [port]` | admin | Zero the counter baseline (all ports, or one) |
+| `clear dhcp lease <client>` | admin | Return one client's address to the pool |
 | `clear mac-table [port]` | admin | Flush learned MACs; static entries are config and stay |
+| `clear spanning-tree bpdu-guard <port>` | admin | Return a port the BPDU guard blocked to service |
+| `clear spanning-tree statistics [port]` | admin | Zero the spanning-tree counter baseline |
 | `daemon start` | admin | Start the daemon via systemd (local only) |
 | `daemon status` | any | Show the service's systemd status (local only) |
 | `doctor` | any | Run framework health checks (transport, schema, theme, keys) |

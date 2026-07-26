@@ -20,6 +20,22 @@ ssh "$HOST" '
     sudo ip link set "$p" nomaster 2>/dev/null || true
   done
   sudo ip link del br0 2>/dev/null || true
+  # Anything a previous run enslaved or created.
+  for i in lan9 lp1 lp2 r10a r20a c10a c20a; do
+    sudo ip link del "$i" 2>/dev/null || true
+  done
+  for n in s5loop lldpns rt10 rt20 cli10 cli20; do
+    sudo ip netns del "$n" 2>/dev/null || true
+  done
+  # And the DURABLE state. "Disposable target" has to mean the commit
+  # history too: a suite that starts from the last run own commits is
+  # testing whatever that run happened to leave behind, and an aborted
+  # run leaves a box no later run can interpret.
+  sudo pkill -x dnsmasq 2>/dev/null || true
+  sudo pkill -x mdns-repeater 2>/dev/null || true
+  sudo pkill -f "[e]inheit_s5 --lldp-daemon" 2>/dev/null || true
+  sudo rm -rf /var/lib/einheit/s5 /var/run/einheit
+  sudo ip link set lo up 2>/dev/null || true
   test -x /usr/local/sbin/ntpd || echo "WARN: ntpd sim missing (test/ntpd_sim.c)"
   test -x /usr/local/bin/einheit_s5 || echo "WARN: einheit_s5 not installed"
   echo prepared

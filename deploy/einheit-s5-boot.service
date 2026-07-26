@@ -34,6 +34,16 @@ Type=oneshot
 # boot-restore outcome for the whole uptime, not just for a moment.
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/einheit_s5 --apply-boot
+# The apply STARTS DAEMONS — dnsmasq for DHCP and DNS, mdns-repeater,
+# the LLDP daemon — because a service is part of the configuration
+# being restored, not a separate boot step. They are setsid'd out of
+# this unit's session, but they are still born into its cgroup, and the
+# default KillMode would sweep them away the moment ExecStart returns:
+# a box that boots with DHCP configured and no DHCP server, on every
+# boot, silently. KillMode=process confines the sweep to our own
+# process. (On the production BusyBox image there is no cgroup to
+# sweep, which is why this is a systemd-only concern.)
+KillMode=process
 # A hardware apply that hangs must not hang the boot forever.
 TimeoutStartSec=120
 # No retry loop: a restore that fails needs an operator, and retrying

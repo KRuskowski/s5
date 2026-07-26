@@ -1,0 +1,15 @@
+# LLDP is on by default and is meant to be reachable through the CLI
+# like everything else: a tx interval an operator can change, ports
+# they can exclude, and a neighbour table they can read.
+[config]
+lldp.enabled true
+lldp.tx_interval 15
+lldp.port.lan5.enabled false
+[expect-box]
+sudo cat /var/run/einheit/lldp.conf :: tx_interval 15
+sudo cat /var/run/einheit/lldp.conf :: \nport lan1\n
+sudo cat /var/run/einheit/lldp.conf :: GENERATED
+pgrep -af 'einheit_s5 --lldp-daemon' :: lldp-daemon
+[expect-cli]
+show system services :: lldp
+show neighbors :: .

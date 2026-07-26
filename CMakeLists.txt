@@ -21,6 +21,11 @@ add_library(s5_lib STATIC
   src/dsa.cc
   src/fabric.cc
   src/poe.cc
+  src/stp.cc
+  src/svc.cc
+  src/lldp.cc
+  src/l3.cc
+  src/dnsmasq.cc
   src/util.cc
   src/sys.cc
 )
